@@ -1,7 +1,8 @@
+use super::entity::Id;
 use super::world::World;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 const NIGHT: (f32, f32, f32) = (8.0, 10.0, 40.0);
 
@@ -13,7 +14,7 @@ fn shade(c: Color, daylight: f32) -> Color {
     Color::Rgb(mix(r, NIGHT.0), mix(g, NIGHT.1), mix(b, NIGHT.2))
 }
 
-pub fn draw_world(world: &World, buf: &mut Buffer, area: Rect) {
+pub fn draw_world(world: &World, buf: &mut Buffer, area: Rect, selected: Option<Id>) {
     let bg = world.scenario.as_ref().map_or(Color::Black, |s| s.background());
     let bg = shade(bg, world.daylight);
     for y in 0..area.height {
@@ -60,6 +61,9 @@ pub fn draw_world(world: &World, buf: &mut Buffer, area: Rect) {
                 if let Some(b) = cell_bg {
                     cell.set_bg(shade(b, world.daylight));
                 }
+                if Some(e.id) == selected && ch != ' ' {
+                    cell.set_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
+                }
             }
         }
     }
@@ -67,4 +71,24 @@ pub fn draw_world(world: &World, buf: &mut Buffer, area: Rect) {
 
 pub fn hud_style() -> Style {
     Style::default().fg(Color::Rgb(180, 180, 190)).bg(Color::Rgb(20, 20, 28))
+}
+
+/// Frontmost visible entity whose glyph covers the cell; large backdrop layers are ignored.
+pub fn pick(world: &World, x: i32, y: i32) -> Option<Id> {
+    world
+        .ents
+        .iter()
+        .filter(|e| e.alive && e.z < 90)
+        .filter(|e| {
+            let f = &e.sprite.frames[e.frame.min(e.sprite.frames.len() - 1)];
+            let fx = x - e.pos.0.round() as i32;
+            let fy = y - e.pos.1.round() as i32;
+            fx >= 0
+                && fy >= 0
+                && (fx as usize) < f.w
+                && (fy as usize) < f.h
+                && f.ch[fy as usize * f.w + fx as usize] != ' '
+        })
+        .min_by_key(|e| (e.z, e.id))
+        .map(|e| e.id)
 }

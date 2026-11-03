@@ -1,9 +1,13 @@
 mod engine;
 mod scenarios;
 
-use engine::render::{draw_world, hud_style};
+use engine::render::{draw_world, hud_style, pick};
 use engine::World;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 use std::time::{Duration, Instant};
@@ -35,10 +39,15 @@ fn dump(args: &[String]) {
     }
     let area = Rect::new(0, 0, w, h);
     let mut buf = ratatui::buffer::Buffer::empty(area);
-    draw_world(&world, &mut buf, area);
+    draw_world(&world, &mut buf, area, None);
     for y in 0..h {
         let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
         println!("{}", row.trim_end());
+    }
+    if let Ok(v) = std::env::var("PICK") {
+        let n: Vec<i32> = v.split(',').filter_map(|p| p.parse().ok()).collect();
+        let hit = pick(&world, n[0], n[1]).and_then(|id| world.ents.iter().find(|e| e.id == id));
+        println!("pick({},{}) = {:?}", n[0], n[1], hit.map(|e| (e.kind, e.id)));
     }
     println!("-- {} ents, globals {:?}", world.ents.len(), world.globals);
 }
@@ -56,6 +65,8 @@ fn main() -> std::io::Result<()> {
         .unwrap_or(0);
 
     let mut terminal = ratatui::init();
+    execute!(std::io::stdout(), EnableMouseCapture)?;
+    let mut selected: Option<engine::Id> = None;
     let size = terminal.size()?;
     let mut world = build(index, size.width as i32, size.height as i32 - 1);
     let mut paused = false;
@@ -67,13 +78,22 @@ fn main() -> std::io::Result<()> {
             terminal.draw(|f| {
                 let area = f.area();
                 let world_area = Rect { height: area.height.saturating_sub(1), ..area };
-                draw_world(&world, f.buffer_mut(), world_area);
+                if selected.is_some_and(|id| !world.ents.iter().any(|e| e.id == id && e.alive)) {
+                    selected = None;
+                }
+                draw_world(&world, f.buffer_mut(), world_area, selected);
                 let hud_area = Rect { y: area.y + world_area.height, height: 1, ..area };
-                let extra = world.scenario.as_ref().map_or(String::new(), |s| {
-                    s.hud(&world.globals, world.daylight)
-                });
+                let extra = match selected.and_then(|id| world.ents.iter().find(|e| e.id == id)) {
+                    Some(e) => format!(
+                        "SELECTED {}#{} at ({:.0},{:.0}) vel ({:.1},{:.1}) data {:.1} state {} age {:.0}s",
+                        e.kind, e.id, e.pos.0, e.pos.1, e.vel.0, e.vel.1, e.data, e.state, e.age
+                    ),
+                    None => world.scenario.as_ref().map_or(String::new(), |s| {
+                        s.hud(&world.globals, world.daylight)
+                    }),
+                };
                 let line = format!(
-                    " {} | {}{} x{:.1} | {} ents | {} | tab:next r:reset space:pause +/-:speed q:quit",
+                    " {} | {}{} x{:.1} | {} ents | {} | tab:next click:inspect r:reset space:pause +/-:speed q:quit",
                     world.scenario_name(),
                     if paused { "PAUSED " } else { "" },
                     "",
@@ -99,13 +119,13 @@ fn main() -> std::io::Result<()> {
                             KeyCode::Char('r') => world = build(index, w, h),
                             KeyCode::Tab => {
                                 index = (index + 1) % scenarios::NAMES.len();
-                                world = build(index, w, h);
+                                { world = build(index, w, h); selected = None; }
                             }
                             KeyCode::Char(c @ '1'..='9') => {
                                 let i = c as usize - '1' as usize;
                                 if i < scenarios::NAMES.len() {
                                     index = i;
-                                    world = build(index, w, h);
+                                    { world = build(index, w, h); selected = None; }
                                 }
                             }
                             KeyCode::Char('+') | KeyCode::Char('=') => speed = (speed * 1.5).min(16.0),
@@ -113,7 +133,13 @@ fn main() -> std::io::Result<()> {
                             _ => {}
                         }
                     }
-                    Event::Resize(w, h) => world = build(index, w as i32, h as i32 - 1),
+                    Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
+                        selected = pick(&world, m.column as i32, m.row as i32);
+                    }
+                    Event::Resize(w, h) => {
+                        world = build(index, w as i32, h as i32 - 1);
+                        selected = None;
+                    }
                     _ => {}
                 }
             }
@@ -132,6 +158,7 @@ fn main() -> std::io::Result<()> {
         }
     })();
 
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
