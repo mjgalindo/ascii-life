@@ -214,11 +214,13 @@ pub struct Sprite {
     pub frames: Arc<Vec<Frame>>,
     /// Hand-drawn pixel art; when absent the ASCII frames are rasterized.
     pub pixels: Option<Arc<Vec<PixFrame>>>,
+    /// Text drawn as real glyphs on top of the pixel canvas so it stays legible.
+    pub overlay: bool,
 }
 
 impl Sprite {
     pub fn new(frames: Vec<Frame>) -> Sprite {
-        Sprite { frames: Arc::new(frames), pixels: None }
+        Sprite { frames: Arc::new(frames), pixels: None, overlay: false }
     }
 
     pub fn one(frame: Frame) -> Sprite {
@@ -233,6 +235,13 @@ impl Sprite {
     /// Like `art`, but mask digits `1`-`9` map to the given colors (e.g. random fish tints).
     pub fn art_d(shape: &str, mask: &str, digits: &[Color; 9]) -> Sprite {
         Sprite::one(Frame::parse(shape, Some(mask), Color::White, digits))
+    }
+
+    /// Text label; the pixel renderer overlays it as characters instead of rasterizing it.
+    pub fn text(shape: &str, color: Color) -> Sprite {
+        let mut s = Sprite::mono(shape, color);
+        s.overlay = true;
+        s
     }
 
     /// Single-frame sprite with every glyph in one color.
@@ -253,6 +262,7 @@ impl Sprite {
     pub fn mirrored(&self) -> Sprite {
         let mut s = Sprite::new(self.frames.iter().map(|f| f.mirrored()).collect());
         s.pixels = self.pixels.as_ref().map(|p| Arc::new(p.iter().map(|f| f.mirrored()).collect()));
+        s.overlay = self.overlay;
         s
     }
 

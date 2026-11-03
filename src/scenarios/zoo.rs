@@ -165,10 +165,20 @@ struct Faces {
     asleep: [Sprite; 2],
 }
 
+pub fn species_sprites(si: usize) -> (&'static str, Sprite, Sprite) {
+    let sp = &SPECIES[si];
+    let f = species_faces(sp);
+    (sp.name, f.awake[1].clone(), f.asleep[1].clone())
+}
+
 fn species_faces(sp: &Species) -> Faces {
     let color = std_palette(sp.color).unwrap();
-    let awake = Sprite::mono(sp.awake, color);
-    let asleep = Sprite::mono(sp.asleep, color);
+    let mut awake = Sprite::mono(sp.awake, color);
+    let mut asleep = Sprite::mono(sp.asleep, color);
+    if let Some(c) = crate::art::animal(sp.name, awake.w() as i32, awake.h() as i32) {
+        asleep = asleep.with_pixels(vec![c.lying().frame()]);
+        awake = awake.with_pixels(vec![c.frame()]);
+    }
     Faces { awake: [awake.mirrored(), awake], asleep: [asleep.mirrored(), asleep] }
 }
 
@@ -259,7 +269,7 @@ impl Behavior for Animal {
 }
 
 fn emote(text: &'static str, x: f32, y: f32) -> Entity {
-    Entity::new("emote", Sprite::mono(text, Color::Rgb(255, 250, 200)))
+    Entity::new("emote", Sprite::text(text, Color::Rgb(255, 250, 200)))
         .at(x, y)
         .vel(0.0, -1.2)
         .z(5)
@@ -322,7 +332,8 @@ fn person(kind: &'static str, shirt: Color) -> Entity {
     let mut f = Frame::blank(1, 2);
     f.set(0, 0, 'o', head, None);
     f.set(0, 1, if kind == "keeper" { 'H' } else { 'A' }, shirt, None);
-    Entity::new(kind, Sprite::one(f)).z(20).die_offscreen()
+    let hat = if kind == "keeper" { Some(Color::Rgb(70, 110, 60)) } else { None };
+    Entity::new(kind, Sprite::one(f).with_pixels(vec![crate::art::person(shirt, hat)])).z(20).die_offscreen()
 }
 
 pub struct Zoo {

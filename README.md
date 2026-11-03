@@ -4,12 +4,15 @@ A tiny ASCII simulation engine in Rust (ratatui), in the spirit of asciiquarium.
 
 ```
 cargo run --release [aquarium|traffic|zoo|village|city]
-cargo run --release -- --dump zoo 30 120 40   # headless: print one frame after 30s
+cargo run --release -- city --world 600x200 --pixel   # big world, half-block pixel art
+cargo run --release -- --dump zoo 30 120 40          # headless: print one frame after 30s
+cargo run --release -- --bench city 60 600 200       # simulation throughput
+`WORLD=WxH VIEW=x,y,zoom PIXEL=1 OUT=cells.txt` tune `--dump`; `tools/render.py cells.txt out.png` turns a dump into an image.
 ```
 
 The `city` world combines them all: every city block is a diorama (zoo pen, fish tank, farmstead, park) between signalised roads with cars, pedestrians and emergency vehicles.
 
-Keys: `tab`/`1-5` switch world, click inspects an entity, `r` reset, `space` pause, `+`/`-` speed, `q` quit.
+Keys: `tab`/`1-6` switch world, `m` toggles ASCII/pixel rendering, arrows or drag pan, `z`/`x` or wheel zoom, `g` fit whole world, click inspects (`f` follows), `+`/`-` change speed (unbounded), `t` turbo (use all CPU), `r` reset, `space` pause, `q` quit.
 
 ## Engine (`src/engine`)
 

@@ -147,7 +147,7 @@ impl Behavior for Villager {
                 let line = self.job.line();
                 if !line.is_empty() {
                     cx.spawn(
-                        Entity::new("emote", Sprite::mono(line, rgb(255, 250, 210)))
+                        Entity::new("emote", Sprite::text(line, rgb(255, 250, 210)))
                             .at(e.pos.0, e.pos.1 - 1.0)
                             .vel(0.0, -1.0)
                             .z(2)
@@ -236,7 +236,7 @@ impl Behavior for Field {
                 self.growth = 0.0;
                 cx.add("food", 10.0);
                 cx.spawn(
-                    Entity::new("emote", Sprite::mono("harvest!", rgb(255, 240, 150)))
+                    Entity::new("emote", Sprite::text("harvest!", rgb(255, 240, 150)))
                         .at(e.pos.0 + 2.0, e.pos.1 - 1.0)
                         .vel(0.0, -1.0)
                         .z(2)
@@ -304,6 +304,13 @@ fn frames_for(art: &str, roof_rows: usize, roof: Color, wall: Color) -> Sprite {
     Sprite::new(vec![make(false), make(true)])
 }
 
+fn house_sprite(roof: Color, wall: Color) -> Sprite {
+    frames_for(HOUSE, 3, roof, wall).with_pixels(vec![
+        crate::art::house(roof, wall, false),
+        crate::art::house(roof, wall, true),
+    ])
+}
+
 const HOUSE: &str = "   /^\\   \n  /   \\  \n /_____\\ \n |[] []| \n |_[ ]_| ";
 const TAVERN: &str = "  _________  \n /  TAVERN \\ \n/___________\\\n |[] [] []| \n |_[_ _]_|_|";
 const BAKERY: &str = "  .-------.\n /  BAKERY\\\n/_________\\\n |[] [] []|\n |___[_]__|";
@@ -311,6 +318,10 @@ const MARKET: &str = "  ~~~~~~~~~~~\n /=/=/=/=/=/=\\\n  MARKET  |  |\n  |_______
 const WELL: &str = " _____ \n |~~~| \n |___| ";
 
 fn tree_sprite() -> Sprite {
+    tree_ascii().with_pixels((0..4).map(crate::art::tree).collect())
+}
+
+fn tree_ascii() -> Sprite {
     let seasons = [
         ("&&&", rgb(120, 200, 100)),
         ("&&&", rgb(60, 150, 60)),
@@ -405,7 +416,7 @@ fn make_villager(
     let mut f = Frame::blank(1, 2);
     f.set(0, 0, 'o', rgb(235, 200, 160), None);
     f.set(0, 1, g, col, None);
-    let body = Sprite::one(f);
+    let body = Sprite::one(f).with_pixels(vec![crate::art::person(col, None)]);
     let villager = Villager {
         day,
         job,
@@ -437,7 +448,7 @@ pub fn yard(cx: &mut Ctx, rect: (i32, i32, i32, i32), day: f32) {
     if h < 6 || w < 16 {
         return;
     }
-    let sprite = frames_for(HOUSE, 3, rgb(176, 60, 50), rgb(150, 120, 90));
+    let sprite = house_sprite(rgb(176, 60, 50), rgb(150, 120, 90));
     let (hx, hy) = (x + 1, y + h - 5);
     cx.spawn(Entity::new("house", sprite).at(hx as f32, hy as f32).z(40).with(Lit));
     cx.spawn(
@@ -590,7 +601,7 @@ impl Scenario for Village {
         for _ in 0..n_homes {
             let roof = *cx.rng.pick(&roofs);
             let wall = *cx.rng.pick(&walls);
-            let sprite = frames_for(HOUSE, 3, roof, wall);
+            let sprite = house_sprite(roof, wall);
             let (sw, sh) = (sprite.w() as i32, sprite.h() as i32);
             if let Some((x, y)) = place(cx, &mut rects, sw, sh, 2) {
                 cx.spawn(Entity::new("house", sprite).at(x as f32, y as f32).z(40).with(Lit));

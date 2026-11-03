@@ -22,7 +22,9 @@ fn random_fish(cx: &mut Ctx, right: bool) -> Sprite {
     let mut digits = [Color::White; 9];
     digits[0] = eye;
     digits[1] = body;
-    Sprite::art_d(shape, mask, &digits).facing(right)
+    let sprite = Sprite::art_d(shape, mask, &digits);
+    let (w, h) = (sprite.w() as i32, sprite.h() as i32);
+    sprite.with_pixels(vec![crate::art::fish(w, h, body, true).frame()]).facing(right)
 }
 
 struct Swimmer {
@@ -134,7 +136,9 @@ fn spawn_special(cx: &mut Ctx) {
     let low = (cx.h - 10.0).max(7.0);
     match cx.rng.int(0, 8) {
         0 => {
-            let sprite = Sprite::mono(SHARK, Color::Rgb(130, 150, 175)).facing(right);
+            let base = Sprite::mono(SHARK, Color::Rgb(130, 150, 175));
+            let (sw, sh) = (base.w() as i32, base.h() as i32);
+            let sprite = base.with_pixels(vec![crate::art::shark(sw, sh).frame()]).facing(right);
             let w = sprite.w() as f32;
             let x = if right { -w } else { cx.w };
             let y = cx.rng.range(6.0, low);
@@ -162,7 +166,9 @@ fn spawn_special(cx: &mut Ctx) {
                     Frame::parse(&art, None, Color::Rgb(70, 110, 190), &[Color::White; 9])
                 })
                 .collect();
-            let sprite = Sprite::new(frames).facing(right);
+            let (ww, wh) = (frames[0].w as i32, frames[0].h as i32);
+            let pix: Vec<_> = (0..3).map(|i| crate::art::whale(ww, wh, 6, i).frame()).collect();
+            let sprite = Sprite::new(frames).with_pixels(pix).facing(right);
             let w = sprite.w() as f32;
             cx.spawn(
                 Entity::new("special", sprite)
@@ -175,7 +181,9 @@ fn spawn_special(cx: &mut Ctx) {
             );
         }
         2 => {
-            let sprite = Sprite::art(SHIP, SHIP_MASK).facing(right);
+            let base = Sprite::art(SHIP, SHIP_MASK);
+            let (sw, sh) = (base.w() as i32, base.h() as i32);
+            let sprite = base.with_pixels(vec![crate::art::ship(sw, sh).frame()]).facing(right);
             let w = sprite.w() as f32;
             cx.spawn(
                 Entity::new("special", sprite)
@@ -202,7 +210,9 @@ fn spawn_special(cx: &mut Ctx) {
         }
         5 => {
             for i in 0..3 {
-                let sprite = Sprite::mono(DOLPHIN, Color::Rgb(120, 150, 200)).facing(right);
+                let base = Sprite::mono(DOLPHIN, Color::Rgb(120, 150, 200));
+                let (dw, dh) = (base.w() as i32, base.h() as i32);
+                let sprite = base.with_pixels(vec![crate::art::dolphin(dw, dh).frame()]).facing(right);
                 let w = sprite.w() as f32;
                 let x = if right { -w - i as f32 * 10.0 } else { cx.w + i as f32 * 10.0 };
                 let mut d = Entity::new("special", sprite)
@@ -216,7 +226,11 @@ fn spawn_special(cx: &mut Ctx) {
             }
         }
         6 => {
-            let sprite = Sprite::mono(BIG_FISH, Color::Rgb(90, 140, 120)).facing(right);
+            let base = Sprite::mono(BIG_FISH, Color::Rgb(90, 140, 120));
+            let (bw, bh) = (base.w() as i32, base.h() as i32);
+            let sprite = base
+                .with_pixels(vec![crate::art::fish(bw, bh, Color::Rgb(96, 150, 128), true).frame()])
+                .facing(right);
             let w = sprite.w() as f32;
             let y = cx.rng.range(5.0, low);
             cx.spawn(
@@ -229,11 +243,15 @@ fn spawn_special(cx: &mut Ctx) {
             );
         }
         7 => {
-            let sprite = Sprite::new(vec![
-                Frame::parse(MONSTER_A, None, Color::Rgb(90, 190, 90), &[Color::White; 9]),
-                Frame::parse(MONSTER_B, None, Color::Rgb(90, 190, 90), &[Color::White; 9]),
-            ])
-            .facing(right);
+            let fa = Frame::parse(MONSTER_A, None, Color::Rgb(90, 190, 90), &[Color::White; 9]);
+            let fb = Frame::parse(MONSTER_B, None, Color::Rgb(90, 190, 90), &[Color::White; 9]);
+            let (mw, mh) = (fa.w as i32, fa.h as i32);
+            let sprite = Sprite::new(vec![fa, fb])
+                .with_pixels(vec![
+                    crate::art::sea_monster(mw, mh, 0.0).frame(),
+                    crate::art::sea_monster(mw, mh, 2.0).frame(),
+                ])
+                .facing(right);
             let w = sprite.w() as f32;
             cx.spawn(
                 Entity::new("special", sprite)
@@ -245,7 +263,8 @@ fn spawn_special(cx: &mut Ctx) {
             );
         }
         _ => {
-            let duck = Sprite::mono("_(o)>", Color::Rgb(240, 220, 120)).facing(right);
+            let duck = Sprite::mono("_(o)>", Color::Rgb(240, 220, 120));
+            let duck = duck.with_pixels(vec![crate::art::duck(5, 1).frame()]).facing(right);
             let w = duck.w() as f32;
             let leader = cx.spawn(
                 Entity::new("special", duck.clone())
@@ -383,6 +402,8 @@ pub fn tank(cx: &mut Ctx, rect: (i32, i32, i32, i32)) {
         let mut digits = [Color::White; 9];
         digits[1] = body;
         let right = Sprite::art_d(shape, mask, &digits);
+        let (fw0, fh0) = (right.w() as i32, right.h() as i32);
+        let right = right.with_pixels(vec![crate::art::fish(fw0, fh0, body, true).frame()]);
         let sprites = [right.mirrored(), right.clone()];
         let fw = right.w() as f32;
         let fh = right.h() as f32;

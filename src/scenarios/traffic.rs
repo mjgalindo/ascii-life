@@ -61,7 +61,9 @@ fn car_sprite(dir: usize, kind: usize, color: Color) -> Sprite {
     let (art, mask) = car_art(dir, kind);
     let mut digits = [Color::White; 9];
     digits[0] = color;
-    Sprite::art_d(&art, &mask, &digits)
+    let sprite = Sprite::art_d(&art, &mask, &digits);
+    let (w, h) = (sprite.w() as i32, sprite.h() as i32);
+    sprite.with_pixels(vec![crate::art::vehicle(dir, w, h, color, None)])
 }
 
 /// Truck-sized body with a flashing red/blue siren.
@@ -76,7 +78,13 @@ fn emergency_sprite(dir: usize) -> Sprite {
         f.set(sx, sy, '@', c, None);
         f
     };
-    Sprite::new(vec![frame(Color::Rgb(255, 50, 50)), frame(Color::Rgb(70, 110, 255))])
+    let (w, h) = (base.w as i32, base.h as i32);
+    let white = Color::Rgb(246, 246, 246);
+    let (red, blue) = (Color::Rgb(255, 50, 50), Color::Rgb(70, 110, 255));
+    Sprite::new(vec![frame(red), frame(blue)]).with_pixels(vec![
+        crate::art::vehicle(dir, w, h, white, Some(red)),
+        crate::art::vehicle(dir, w, h, white, Some(blue)),
+    ])
 }
 
 struct Car {
@@ -573,7 +581,7 @@ impl Traffic {
         let speed = cx.rng.range(2.0, 3.5);
         let phase = cx.rng.range(0.0, 6.0);
         cx.spawn(
-            Entity::new("ped", Sprite::one(f))
+            Entity::new("ped", Sprite::one(f).with_pixels(vec![crate::art::walker(shirt)]))
                 .at(x as f32, y as f32)
                 .z(12)
                 .die_offscreen()
