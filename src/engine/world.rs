@@ -276,6 +276,10 @@ pub trait Scenario {
     fn background(&self) -> Color {
         Color::Rgb(0, 0, 0)
     }
+    /// World size this scenario is designed around; `None` follows the terminal.
+    fn preferred_size(&self) -> Option<(i32, i32)> {
+        None
+    }
     /// Extra status text for the HUD.
     fn hud(&self, _globals: &Globals, _daylight: f32) -> String {
         String::new()

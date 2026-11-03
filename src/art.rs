@@ -297,6 +297,101 @@ pub fn animal(name: &str, w: i32, h: i32) -> Option<Canvas> {
             c.line(0, (hf * 0.9) as i32, 1, (hf * 0.7) as i32, scaled(tan, 0.9));
             c.rect(w - 2, (hf * 0.45) as i32, 1, (hf * 0.22) as i32, scaled(tan, 0.9));
         }
+        "TIGER" => {
+            let orange = rgb(232, 128, 40);
+            c.ellipse(wf * 0.42, hf * 0.50, wf * 0.34, hf * 0.27, orange);
+            for x in [1, 3, 5, 6] {
+                c.rect(x, (hf * 0.62) as i32, 1, (hf * 0.38) as i32, scaled(orange, 0.85));
+            }
+            c.ellipse(wf * 0.80, hf * 0.42, wf * 0.19, hf * 0.34, scaled(orange, 1.05));
+            c.ellipse(wf * 0.88, hf * 0.52, wf * 0.10, hf * 0.14, WHITE);
+            c.set(w - 3, (hf * 0.36) as i32, EYE);
+            c.set(w - 1, (hf * 0.50) as i32, EYE);
+            c.line(0, (hf * 0.45) as i32, 1, (hf * 0.28) as i32, orange);
+            for x in (2..w - 3).step_by(2) {
+                for y in 0..h * 2 {
+                    if c.get(x, y) == Some(orange) || c.get(x, y) == Some(scaled(orange, 0.85)) {
+                        c.set(x, y, rgb(40, 28, 24));
+                    }
+                }
+            }
+        }
+        "HIPPO" => {
+            let hide = rgb(150, 124, 150);
+            c.ellipse(wf * 0.42, hf * 0.52, wf * 0.40, hf * 0.34, hide);
+            for x in [2, 3, 7, 8] {
+                c.rect(x, (hf * 0.70) as i32, 2, (hf * 0.30) as i32, scaled(hide, 0.85));
+            }
+            c.ellipse(wf * 0.80, hf * 0.50, wf * 0.22, hf * 0.32, scaled(hide, 1.08));
+            c.rect(w - 4, (hf * 0.62) as i32, 4, 1, rgb(214, 130, 140));
+            c.set((wf * 0.74) as i32, (hf * 0.28) as i32, hide);
+            c.set((wf * 0.78) as i32, (hf * 0.36) as i32, EYE);
+            c.set(w - 2, (hf * 0.46) as i32, EYE);
+        }
+        "RHINO" => {
+            let grey = rgb(150, 150, 160);
+            c.ellipse(wf * 0.40, hf * 0.52, wf * 0.36, hf * 0.30, grey);
+            for x in [1, 3, 6, 7] {
+                c.rect(x, (hf * 0.66) as i32, 2, (hf * 0.34) as i32, scaled(grey, 0.85));
+            }
+            c.ellipse(wf * 0.82, hf * 0.50, wf * 0.19, hf * 0.28, scaled(grey, 1.05));
+            c.line(w - 2, (hf * 0.34) as i32, w - 3, (hf * 0.12) as i32, rgb(232, 226, 210));
+            c.set((wf * 0.72) as i32, (hf * 0.22) as i32, grey);
+            c.set((wf * 0.80) as i32, (hf * 0.42) as i32, EYE);
+        }
+        "WOLVES" => {
+            let fur = rgb(132, 134, 146);
+            c.ellipse(wf * 0.40, hf * 0.52, wf * 0.32, hf * 0.22, fur);
+            for x in [2, 3, 6, 7] {
+                c.rect(x, (hf * 0.62) as i32, 1, (hf * 0.38) as i32, scaled(fur, 0.85));
+            }
+            c.ellipse(wf * 0.76, hf * 0.40, wf * 0.14, hf * 0.22, scaled(fur, 1.08));
+            c.rect(w - 3, (hf * 0.44) as i32, 3, 2, rgb(190, 190, 198));
+            c.set((wf * 0.72) as i32, (hf * 0.10) as i32, fur);
+            c.set((wf * 0.82) as i32, (hf * 0.10) as i32, fur);
+            c.set((wf * 0.78) as i32, (hf * 0.34) as i32, EYE);
+            c.set(w - 1, (hf * 0.46) as i32, EYE);
+            c.line(0, (hf * 0.72) as i32, 2, (hf * 0.48) as i32, scaled(fur, 0.9));
+        }
+        "DEER" => {
+            let tan = rgb(190, 130, 76);
+            c.ellipse(wf * 0.40, hf * 0.52, wf * 0.28, hf * 0.18, tan);
+            for x in [2, 3, 5, 6] {
+                c.rect(x, (hf * 0.58) as i32, 1, (hf * 0.42) as i32, scaled(tan, 0.85));
+            }
+            c.line((wf * 0.58) as i32, (hf * 0.44) as i32, (wf * 0.72) as i32, (hf * 0.20) as i32, tan);
+            c.ellipse(wf * 0.78, hf * 0.20, wf * 0.14, hf * 0.10, scaled(tan, 1.08));
+            let antler = rgb(220, 200, 160);
+            c.line((wf * 0.74) as i32, (hf * 0.12) as i32, (wf * 0.66) as i32, 0, antler);
+            c.line((wf * 0.80) as i32, (hf * 0.12) as i32, (wf * 0.88) as i32, 0, antler);
+            c.set((wf * 0.80) as i32, (hf * 0.20) as i32, EYE);
+            for (x, y) in [(3, 0.42), (5, 0.48), (2, 0.50)] {
+                c.set(x, (hf * y) as i32, WHITE);
+            }
+        }
+        "TORTOISES" => {
+            let shell = rgb(102, 128, 62);
+            c.ellipse(wf * 0.42, hf * 0.50, wf * 0.34, hf * 0.40, shell);
+            for (x, y) in [(0.30, 0.40), (0.42, 0.30), (0.54, 0.42), (0.40, 0.55), (0.30, 0.62)] {
+                c.set((wf * x) as i32, (hf * y) as i32, rgb(66, 88, 40));
+            }
+            c.ellipse(wf * 0.86, hf * 0.62, wf * 0.10, hf * 0.18, rgb(168, 176, 98));
+            c.set(w - 2, (hf * 0.56) as i32, EYE);
+            for x in [2, 3, 7, 8] {
+                c.set(x, h * 2 - 1, rgb(150, 160, 90));
+            }
+        }
+        "OSTRICHES" => {
+            let dark = rgb(54, 52, 60);
+            c.ellipse(wf * 0.40, hf * 0.50, wf * 0.34, hf * 0.22, dark);
+            c.ellipse(wf * 0.24, hf * 0.46, wf * 0.14, hf * 0.14, WHITE);
+            c.line((wf * 0.62) as i32, (hf * 0.44) as i32, (wf * 0.74) as i32, (hf * 0.12) as i32, rgb(234, 190, 170));
+            c.ellipse(wf * 0.78, hf * 0.10, wf * 0.12, hf * 0.07, rgb(238, 200, 180));
+            c.set(w - 1, (hf * 0.10) as i32, rgb(240, 160, 50));
+            c.set((wf * 0.76) as i32, (hf * 0.08) as i32, EYE);
+            c.line(3, (hf * 0.66) as i32, 3, h * 2 - 1, rgb(234, 190, 170));
+            c.line(4, (hf * 0.66) as i32, 5, h * 2 - 1, rgb(234, 190, 170));
+        }
         _ => return None,
     }
     c.relight();

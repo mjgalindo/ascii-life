@@ -305,6 +305,10 @@ impl Scenario for Aquarium {
         "aquarium"
     }
 
+    fn preferred_size(&self) -> Option<(i32, i32)> {
+        Some((280, 90))
+    }
+
     fn background(&self) -> Color {
         Color::Rgb(8, 40, 90)
     }

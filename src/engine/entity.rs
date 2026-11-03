@@ -7,7 +7,7 @@ pub type Id = u64;
 /// (override with `.scenery()` or by assigning the field).
 const SCENERY_KINDS: &[&str] = &[
     "road", "ground", "building", "tree", "pen", "tank", "lamp", "well", "bench", "seaweed", "emote",
-    "smoke", "rain", "snow", "trail", "house", "field", "chimney", "bubble",
+    "smoke", "rain", "snow", "trail", "house", "field", "chimney", "bubble", "kiosk", "label",
 ];
 
 /// Per-entity logic. Every hook is optional; entities without a behavior simply drift with `vel`.

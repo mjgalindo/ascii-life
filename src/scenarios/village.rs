@@ -12,8 +12,10 @@ fn clock(t: f32, day: f32) -> f32 {
     (t / day + 0.4).fract()
 }
 
-fn season(t: f32) -> usize {
-    ((t / DAY / DAYS_PER_SEASON) as usize) % 4
+/// Season for a day length; a non-positive length means the default.
+fn season(t: f32, day: f32) -> usize {
+    let day = if day > 0.0 { day } else { DAY };
+    ((t / day / DAYS_PER_SEASON) as usize) % 4
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -202,7 +204,7 @@ impl Behavior for Lit {
 struct Tree;
 impl Behavior for Tree {
     fn update(&mut self, e: &mut Entity, cx: &mut Ctx, _dt: f32) {
-        e.frame = season(cx.time);
+        e.frame = season(cx.time, cx.global("daylen"));
     }
 }
 
@@ -212,7 +214,7 @@ struct Field {
 }
 impl Behavior for Field {
     fn update(&mut self, e: &mut Entity, cx: &mut Ctx, dt: f32) {
-        let s = season(cx.time);
+        let s = season(cx.time, cx.global("daylen"));
         if s != 3 && self.growth < 1.0 {
             self.growth = (self.growth + dt / 55.0).min(1.0);
         }
@@ -374,7 +376,8 @@ pub struct Village {
     homes: Vec<(f32, f32)>,
     work_sites: Vec<(Job, (f32, f32))>,
     plaza: (f32, f32),
-    tavern: (f32, f32),
+    taverns: Vec<(f32, f32)>,
+    day: f32,
     forest: Vec<(f32, f32)>,
     season: usize,
     births_cd: f32,
@@ -489,6 +492,21 @@ pub fn park(cx: &mut Ctx, rect: (i32, i32, i32, i32)) {
 }
 
 impl Village {
+    fn day_len(&self) -> f32 {
+        if self.day > 0.0 { self.day } else { DAY }
+    }
+
+    fn nearest_tavern(&self, p: (f32, f32)) -> (f32, f32) {
+        self.taverns
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                let d = |q: &(f32, f32)| (q.0 - p.0).powi(2) + (q.1 - p.1).powi(2) * 4.0;
+                d(a).total_cmp(&d(b))
+            })
+            .unwrap_or(self.plaza)
+    }
+
     fn spawn_villager(&self, cx: &mut Ctx, job: Job, home: (f32, f32), at_home: bool) {
         let work = self
             .work_sites
@@ -499,17 +517,18 @@ impl Village {
         let workspot = if job == Job::Woodcutter && !self.forest.is_empty() {
             *cx.rng.pick(&self.forest)
         } else if job == Job::Child || job == Job::Guard || work.is_empty() {
-            self.plaza
+            self.nearest_tavern(home)
         } else {
             *cx.rng.pick(&work)
         };
-        let social = (self.tavern.0 + cx.rng.range(-2.0, 2.0), self.tavern.1);
+        let tavern = self.nearest_tavern(home);
+        let social = (tavern.0 + cx.rng.range(-2.0, 2.0), tavern.1);
         let start = if at_home {
             home
         } else {
             (cx.rng.range(2.0, cx.w - 3.0), cx.rng.range(2.0, cx.h - 4.0))
         };
-        make_villager(cx, job, home, workspot, social, start, DAY);
+        make_villager(cx, job, home, workspot, social, start, self.day_len());
     }
 }
 
@@ -518,12 +537,16 @@ impl Scenario for Village {
         "village"
     }
 
+    fn preferred_size(&self) -> Option<(i32, i32)> {
+        Some((320, 110))
+    }
+
     fn background(&self) -> Color {
         GROUND[self.season]
     }
 
     fn day_length(&self) -> Option<f32> {
-        Some(DAY)
+        Some(self.day_len())
     }
 
     fn hud(&self, g: &Globals, _daylight: f32) -> String {
@@ -543,6 +566,8 @@ impl Scenario for Village {
         let mut rects: Vec<(i32, i32, i32, i32)> = vec![];
         self.plaza = (cx.w / 2.0, cx.h / 2.0);
         rects.push((w / 2 - 8, h / 2 - 4, 16, 8));
+        self.day = DAY * (cx.w / 160.0).clamp(1.0, 3.0);
+        cx.set("daylen", self.day);
         cx.set("food", 20.0);
 
         // Well at the heart of the plaza.
@@ -552,31 +577,29 @@ impl Scenario for Village {
                 .z(30),
         );
 
-        // Tavern and market flank the plaza, bakery nearby.
+        // Taverns, bakeries and markets: one set near the plaza, more spread across big maps.
         let specials: [(&str, Job, Color, Color, i32); 3] = [
             (TAVERN, Job::Child, rgb(120, 60, 40), rgb(110, 80, 60), 0),
             (BAKERY, Job::Baker, rgb(170, 100, 50), rgb(150, 120, 80), 1),
             (MARKET, Job::Merchant, rgb(190, 60, 60), rgb(130, 100, 70), 2),
         ];
-        for (art, job, roof, wall, i) in specials {
-            let sprite = match i {
-                2 => frames_for(art, 2, roof, wall),
-                _ => frames_for(art, 2, roof, wall),
-            };
-            let (sw, sh) = (sprite.w() as i32, sprite.h() as i32);
-            let spot = place(cx, &mut rects, sw, sh, 3);
-            if let Some((x, y)) = spot {
-                cx.spawn(Entity::new("building", sprite).at(x as f32, y as f32).z(40).with(Lit));
-                let door = ((x + sw / 2) as f32, (y + sh) as f32);
-                if i == 0 {
-                    self.tavern = door;
-                } else {
-                    self.work_sites.push((job, door));
+        for _ in 0..(1 + w / 120) {
+            for (art, job, roof, wall, i) in specials {
+                let sprite = frames_for(art, 2, roof, wall);
+                let (sw, sh) = (sprite.w() as i32, sprite.h() as i32);
+                if let Some((x, y)) = place(cx, &mut rects, sw, sh, 3) {
+                    cx.spawn(Entity::new("building", sprite).at(x as f32, y as f32).z(40).with(Lit));
+                    let door = ((x + sw / 2) as f32, (y + sh) as f32);
+                    if i == 0 {
+                        self.taverns.push(door);
+                    } else {
+                        self.work_sites.push((job, door));
+                    }
                 }
             }
         }
-        if self.tavern == (0.0, 0.0) {
-            self.tavern = self.plaza;
+        if self.taverns.is_empty() {
+            self.taverns.push(self.plaza);
         }
 
         // Fields.
@@ -595,7 +618,7 @@ impl Scenario for Village {
         }
 
         // Homes.
-        let n_homes = ((w * h) / 380).clamp(4, 24);
+        let n_homes = ((w * h) / 380).clamp(4, 120);
         let roofs = [rgb(176, 60, 50), rgb(150, 80, 40), rgb(70, 90, 140), rgb(110, 110, 60)];
         let walls = [rgb(150, 120, 90), rgb(130, 110, 100), rgb(160, 135, 95)];
         for _ in 0..n_homes {
@@ -656,12 +679,12 @@ impl Scenario for Village {
     }
 
     fn tick(&mut self, cx: &mut Ctx, dt: f32) {
-        self.season = season(cx.time);
+        self.season = season(cx.time, self.day);
         cx.set("season", self.season as f32);
 
         // Food is eaten gradually; surplus lets the village grow.
         let pop = cx.snap.count("villager") as f32;
-        cx.add("food", -pop * 0.012 * dt);
+        cx.add("food", -pop * 0.004 * dt);
         if cx.global("food") < 0.0 {
             cx.set("food", 0.0);
         }
@@ -676,7 +699,7 @@ impl Scenario for Village {
         }
 
         // Rain in spring on odd days, snow all winter.
-        let day = (cx.time / DAY) as i32;
+        let day = (cx.time / self.day_len()) as i32;
         let (rain, snow) = (self.season == 0 && day % 2 == 1, self.season == 3);
         if rain || snow {
             let n = (cx.w / 12.0) as i32;

@@ -595,6 +595,10 @@ impl Scenario for Traffic {
         if self.city { "city" } else { "traffic" }
     }
 
+    fn preferred_size(&self) -> Option<(i32, i32)> {
+        Some(if self.city { (520, 160) } else { (400, 130) })
+    }
+
     fn background(&self) -> Color {
         GROUND
     }

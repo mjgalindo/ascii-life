@@ -33,6 +33,16 @@ fn build(index: usize, w: i32, h: i32) -> World {
     World::new(w, h, seed(), scenarios::make(index))
 }
 
+/// World for a scenario: an explicit size wins, then the scenario's own preference,
+/// then twice the terminal.
+fn new_world(index: usize, forced: Option<(i32, i32)>, term: (i32, i32)) -> World {
+    let scenario = scenarios::make(index);
+    let size = forced
+        .or_else(|| scenario.preferred_size())
+        .unwrap_or(((term.0 * 2).max(200), (term.1 * 2).max(60)));
+    World::new(size.0, size.1, seed(), scenario)
+}
+
 fn scenario_index(name: &str) -> usize {
     scenarios::NAMES.iter().position(|n| n.starts_with(name)).unwrap_or(0)
 }
@@ -162,10 +172,9 @@ fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture)?;
     let size = terminal.size()?;
-    let (ww, wh) = flag(&args, "--world")
-        .and_then(|s| parse_size(&s))
-        .unwrap_or(((size.width as i32 * 2).max(200), (size.height as i32 * 2).max(60)));
-    let mut world = build(index, ww, wh);
+    let forced = flag(&args, "--world").and_then(|s| parse_size(&s));
+    let term = (size.width as i32, size.height as i32);
+    let mut world = new_world(index, forced, term);
     let mut view = View::new();
     view.pixel = args.iter().any(|a| a == "--pixel");
     let mut selected: Option<engine::Id> = None;
@@ -236,19 +245,19 @@ fn main() -> std::io::Result<()> {
                             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                             KeyCode::Char(' ') | KeyCode::Char('p') => paused = !paused,
                             KeyCode::Char('r') => {
-                                world = build(index, world.w, world.h);
+                                world = new_world(index, forced, (cols, rows));
                                 selected = None;
                             }
                             KeyCode::Tab => {
                                 index = (index + 1) % scenarios::NAMES.len();
-                                world = build(index, world.w, world.h);
+                                world = new_world(index, forced, (cols, rows));
                                 selected = None;
                             }
                             KeyCode::Char(c @ '1'..='9') => {
                                 let i = c as usize - '1' as usize;
                                 if i < scenarios::NAMES.len() {
                                     index = i;
-                                    world = build(index, world.w, world.h);
+                                    world = new_world(index, forced, (cols, rows));
                                     selected = None;
                                 }
                             }
