@@ -63,10 +63,26 @@ fn car_sprite(dir: usize, kind: usize, color: Color) -> Sprite {
     Sprite::art_d(&art, &mask, &digits)
 }
 
+/// Truck-sized body with a flashing red/blue siren.
+fn emergency_sprite(dir: usize) -> Sprite {
+    let (art, mask) = car_art(dir, 1);
+    let mut digits = [Color::White; 9];
+    digits[0] = Color::Rgb(245, 245, 245);
+    let base = Frame::parse(&art, Some(&mask), Color::White, &digits);
+    let (sx, sy) = if dir % 2 == 0 { (2, 0) } else { (1, 1) };
+    let frame = |c: Color| {
+        let mut f = base.clone();
+        f.set(sx, sy, '@', c, None);
+        f
+    };
+    Sprite::new(vec![frame(Color::Rgb(255, 50, 50)), frame(Color::Rgb(70, 110, 255))])
+}
+
 struct Car {
     dir: usize,
     kind: usize,
     color: Color,
+    emergency: bool,
     v: f32,
     vmax: f32,
     sig: Option<Id>,
@@ -90,7 +106,11 @@ impl Car {
 
     fn change_dir(&mut self, e: &mut Entity, dir: usize, x: f32, y: f32) {
         self.dir = dir;
-        e.set_sprite(car_sprite(dir, self.kind, self.color));
+        e.set_sprite(if self.emergency {
+            emergency_sprite(dir)
+        } else {
+            car_sprite(dir, self.kind, self.color)
+        });
         e.pos = (x, y);
         self.v *= 0.6;
         self.turn = false;
@@ -126,6 +146,12 @@ impl Behavior for Car {
                 }
             }
         }
+        for o in ahead.iter().filter(|o| o.kind == "ped") {
+            let g = Car::gap(d, me, o.rect);
+            if g >= 0 {
+                allowed = allowed.min((g - 1) as f32);
+            }
+        }
         for s in ahead.iter().filter(|o| o.kind == "signal") {
             let g = Car::gap(d, me, s.rect);
             if g < 0 {
@@ -134,7 +160,7 @@ impl Behavior for Car {
             let phase = s.state;
             let (green, yellow) = if d % 2 == 1 { (0, 1) } else { (3, 4) };
             let can_run_yellow = phase == yellow && (g as f32) < stop_dist;
-            let must_stop = phase != green && !can_run_yellow;
+            let must_stop = phase != green && !can_run_yellow && !self.emergency;
             let inter_len = if d % 2 == 0 { s.rect.2 } else { s.rect.3 };
             let box_blocked =
                 stationary_beyond.iter().any(|&sg| sg >= g && sg < g + inter_len + my_len + 2);
@@ -152,6 +178,7 @@ impl Behavior for Car {
         self.v = (self.v + dv).max(0.0);
         e.vel = (DX[d] * self.v, DY[d] * self.v);
         e.data = self.v;
+        e.state = if self.emergency { 1 + d as i32 } else { 0 };
 
         // Right turns at intersections.
         let inside = cx.snap.query(me.0, me.1, me.2, me.3);
@@ -180,25 +207,94 @@ impl Behavior for Car {
 }
 
 /// Cycles one intersection through north-south green, east-west green, with all-red gaps.
+/// Approaching emergency vehicles hold their axis green.
 struct Signal {
     t: f32,
 }
 
 const PHASES: [(i32, f32); 6] = [(0, 9.0), (1, 2.0), (2, 1.5), (3, 9.0), (4, 2.0), (5, 1.5)];
+const CYCLE: f32 = 25.0;
+
+fn phase_start(p: i32) -> f32 {
+    PHASES.iter().take(p as usize).map(|x| x.1).sum()
+}
 
 impl Behavior for Signal {
-    fn update(&mut self, e: &mut Entity, _cx: &mut Ctx, dt: f32) {
+    fn update(&mut self, e: &mut Entity, cx: &mut Ctx, dt: f32) {
         self.t += dt;
-        let total: f32 = PHASES.iter().map(|p| p.1).sum();
-        self.t %= total;
-        let mut acc = 0.0;
-        for (phase, len) in PHASES {
-            acc += len;
-            if self.t < acc {
-                e.state = phase;
-                break;
+        self.t %= CYCLE;
+
+        let r = e.rect();
+        let near = cx.snap.query(r.0 - 22, r.1 - 12, r.2 + 44, r.3 + 24);
+        let wanted = near.iter().find_map(|o| {
+            if o.kind != "car" || o.state == 0 {
+                return None;
+            }
+            let d = (o.state - 1) as usize;
+            let approaching = match d {
+                0 => o.rect.0 < r.0 + r.2 && o.rect.1 >= r.1,
+                2 => o.rect.0 + o.rect.2 > r.0 && o.rect.1 >= r.1,
+                1 => o.rect.1 < r.1 + r.3,
+                _ => o.rect.1 + o.rect.3 > r.1,
+            };
+            approaching.then_some(d % 2)
+        });
+        let phase = PHASES
+            .iter()
+            .scan(0.0, |acc, p| {
+                *acc += p.1;
+                Some((*acc, p.0))
+            })
+            .find(|(end, _)| self.t < *end)
+            .map_or(0, |p| p.1);
+        if let Some(axis) = wanted {
+            let (green, other_green, other_yellow) =
+                if axis == 1 { (0, 3, 4) } else { (3, 0, 1) };
+            if phase == green {
+                self.t = self.t.min(phase_start(green) + 6.0);
+            } else if phase == other_green {
+                self.t = phase_start(other_yellow);
             }
         }
+        e.state = phase;
+    }
+}
+
+struct Ped {
+    dir: usize,
+    speed: f32,
+    waited: f32,
+    phase: f32,
+}
+
+impl Behavior for Ped {
+    fn update(&mut self, e: &mut Entity, cx: &mut Ctx, dt: f32) {
+        let d = self.dir;
+        let me = e.rect();
+        let probe = match d {
+            0 => (me.0 + 1, me.1, 2, 1),
+            2 => (me.0 - 2, me.1, 2, 1),
+            1 => (me.0, me.1 + me.3, 1, 2),
+            _ => (me.0, me.1 - 2, 1, 2),
+        };
+        let mut wait = false;
+        for s in cx.snap.query(probe.0, probe.1, probe.2, probe.3) {
+            if s.kind != "signal" {
+                continue;
+            }
+            let inside = crate::engine::world::overlaps(me, s.rect);
+            // Crossing a road is safe while that road's own traffic is stopped.
+            let safe = if d % 2 == 0 { s.state == 3 } else { s.state == 0 };
+            if !inside && !safe {
+                wait = true;
+            }
+        }
+        let scale = if d % 2 == 1 { 0.5 } else { 1.0 };
+        let v = if wait { 0.0 } else { self.speed * scale };
+        self.waited = if wait { self.waited + dt } else { 0.0 };
+        let bob = (e.age * 6.0 + self.phase).sin() * 0.2;
+        e.vel = (DX[d] * v + if d % 2 == 1 { bob } else { 0.0 }, DY[d] * v);
+        e.data = v;
     }
 }
 
@@ -336,13 +432,15 @@ impl Traffic {
     }
 
     fn spawn_car(&self, cx: &mut Ctx, dir: usize, x: f32, y: f32, moving: bool) {
+        let emergency = moving && cx.rng.chance(0.012);
         let kind = match cx.rng.f() {
             f if f < 0.78 => 0,
             f if f < 0.93 => 1,
             _ => 2,
         };
         let color = std_palette(*cx.rng.pick(BODY_COLORS)).unwrap();
-        let sprite = car_sprite(dir, kind, color);
+        let kind = if emergency { 1 } else { kind };
+        let sprite = if emergency { emergency_sprite(dir) } else { car_sprite(dir, kind, color) };
         let (w, h) = (sprite.w() as f32, sprite.h() as f32);
         let (x, y) = match dir {
             0 => (x - w, y),
@@ -354,9 +452,51 @@ impl Traffic {
         if cx.snap.query(probe.0, probe.1, probe.2, probe.3).iter().any(|o| o.kind == "car") {
             return;
         }
-        let vmax = cx.rng.range(7.0, 13.0) * Car::axis_scale(dir);
-        let car = Car { dir, kind, color, v: if moving { vmax } else { 0.0 }, vmax, sig: None, turn: false };
-        cx.spawn(Entity::new("car", sprite).at(x, y).z(10).die_offscreen().with(car));
+        let mut vmax = cx.rng.range(7.0, 13.0) * Car::axis_scale(dir);
+        if emergency {
+            vmax *= 1.4;
+        }
+        let car = Car { dir, kind, color, emergency, v: if moving { vmax } else { 0.0 }, vmax, sig: None, turn: false };
+        let mut e = Entity::new("car", sprite).at(x, y).z(10).die_offscreen().with(car);
+        if emergency {
+            e.anim_fps = 4.0;
+        }
+        cx.spawn(e);
+    }
+}
+
+impl Traffic {
+    /// Pedestrians walk the full length of a sidewalk, crossing at signals.
+    fn spawn_ped(&self, cx: &mut Ctx) {
+        let (w, h) = (cx.w as i32, cx.h as i32);
+        let horizontal = cx.rng.chance(0.6);
+        let (dir, x, y) = if horizontal && !self.hroads.is_empty() {
+            let r = *cx.rng.pick(&self.hroads);
+            let row = r + if cx.rng.chance(0.5) { 0 } else { 4 };
+            if cx.rng.chance(0.5) { (0, -1, row) } else { (2, w, row) }
+        } else if !self.vroads.is_empty() {
+            let c = *cx.rng.pick(&self.vroads);
+            let col = c + if cx.rng.chance(0.5) { 0 } else { 8 };
+            if cx.rng.chance(0.5) { (1, col, -2) } else { (3, col, h) }
+        } else {
+            return;
+        };
+        let probe = (x - 2, y - 2, 5, 5);
+        if cx.snap.query(probe.0, probe.1, probe.2, probe.3).iter().any(|o| o.kind == "ped") {
+            return;
+        }
+        let shirt = std_palette(*cx.rng.pick(&['R', 'B', 'G', 'Y', 'M', 'C', 'O', 'p', 'W'])).unwrap();
+        let mut f = Frame::blank(1, 1);
+        f.set(0, 0, 'i', shirt, None);
+        let speed = cx.rng.range(2.0, 3.5);
+        let phase = cx.rng.range(0.0, 6.0);
+        cx.spawn(
+            Entity::new("ped", Sprite::one(f))
+                .at(x as f32, y as f32)
+                .z(12)
+                .die_offscreen()
+                .with(Ped { dir, speed, waited: 0.0, phase }),
+        );
     }
 }
 
@@ -376,9 +516,10 @@ impl Scenario for Traffic {
     fn hud(&self, g: &Globals, daylight: f32) -> String {
         let t = |k| g.get(k).copied().unwrap_or(0.0) as i32;
         format!(
-            "cars {} (waiting {}) trips {} | {}",
+            "cars {} (waiting {}) walkers {} trips {} | {}",
             t("cars"),
             t("waiting"),
+            t("walkers"),
             t("trips"),
             if daylight > 0.45 { "day" } else { "night" }
         )
@@ -485,12 +626,17 @@ impl Scenario for Traffic {
         cx.globals.insert("cars", cx.snap.count("car") as f32);
         cx.globals.insert("waiting", waiting as f32);
 
+        cx.globals.insert("walkers", cx.snap.count("ped") as f32);
+
         self.spawn_acc += dt;
         if self.spawn_acc < 0.25 {
             return;
         }
         self.spawn_acc = 0.0;
         let (w, h) = (cx.w as i32, cx.h as i32);
+        if cx.snap.count("ped") < (w / 5) as usize && cx.rng.chance(0.35) {
+            self.spawn_ped(cx);
+        }
         for (dir, x, y) in self.lanes(w, h) {
             if cx.rng.chance(0.1) {
                 let (sx, sy) = match dir {
