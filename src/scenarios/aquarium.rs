@@ -174,10 +174,25 @@ impl Fish {
         let hungry = self.energy < 1.4;
         let id = e.id;
         let tags = e.tags;
-        cx.snap.each(x as i32 - 18, y as i32 - 8, 36, 16, |o| {
-            let (dx, dy) = (o.pos.0 - x, (o.pos.1 - y) * 2.0);
+        let (mid_x, mid_y) = (x + own_w / 2.0, y + own_h / 2.0);
+        let mut snack_dist = f32::MAX;
+        // Rectangle overlap reaches further toward wide sprites' origins, and visit order runs
+        // from the top left, so range is measured between centers and no neighbor is favored.
+        let margin = 16;
+        cx.snap.each(mid_x as i32 - 18 - margin, mid_y as i32 - 8 - margin, 36 + margin * 2, 16 + margin * 2, |o| {
+            let (ox_mid, oy_mid) = (o.rect.0 as f32 + o.rect.2 as f32 / 2.0, o.rect.1 as f32 + o.rect.3 as f32 / 2.0);
+            if (ox_mid - mid_x).abs() > 18.0 || (oy_mid - mid_y).abs() > 8.0 {
+                return;
+            }
+            let (dx, dy) = (ox_mid - mid_x, (oy_mid - mid_y) * 2.0);
             match o.kind {
-                "plankton" if snack.is_none() && hungry => snack = Some((o.id, o.pos)),
+                "plankton" if hungry => {
+                    let d = dx * dx + dy * dy;
+                    if d < snack_dist {
+                        snack_dist = d;
+                        snack = Some((o.id, o.pos));
+                    }
+                }
                 "fish" if o.id != id => {
                     // Personal space scales with both sprites, so every fish stays readable.
                     let gap_x = (own_w + o.rect.2 as f32) / 2.0 + 1.5;
@@ -199,7 +214,7 @@ impl Fish {
                         panic_dir = (panic_dir.0 + o.vel.0, panic_dir.1 + o.vel.1 * 2.0);
                         nearest_hop = nearest_hop.min(o.data);
                     }
-                    if o.tags == tags && mates < 10.0 {
+                    if o.tags == tags {
                         mates += 1.0;
                         ali = (ali.0 + o.vel.0, ali.1 + o.vel.1);
                         coh = (coh.0 + dx, coh.1 + dy);
@@ -253,11 +268,13 @@ impl Fish {
 
         let mut s = (e.vel.0, e.vel.1 * 2.0);
         if mates > 0.0 {
-            s.0 += ali.0 / mates * 0.5 + coh.0 / mates * 0.05 + sep.0 * 14.0;
-            s.1 += ali.1 / mates * 0.5 + coh.1 / mates * 0.05 + sep.1 * 14.0;
+            // Crowding should not grow the repulsion without limit.
+            let crowd = (10.0 / mates).min(1.0);
+            s.0 += ali.0 / mates * 0.5 + coh.0 / mates * 0.05 + sep.0 * 14.0 * crowd;
+            s.1 += ali.1 / mates * 0.5 + coh.1 / mates * 0.05 + sep.1 * 14.0 * crowd;
         }
         if let (Some((id, p)), false) = (snack, scared) {
-            let (dx, dy) = (p.0 - x, (p.1 - y) * 2.0);
+            let (dx, dy) = (p.0 - mid_x, (p.1 - mid_y) * 2.0);
             // Hungrier fish break formation to feed.
             let pull = if self.energy < 0.6 { 1.2 } else { 0.4 };
             s.0 += dx * pull;
