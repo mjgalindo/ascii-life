@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 const FRAME: Duration = Duration::from_millis(33);
 
 fn seed() -> u64 {
+    if let Some(v) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
+        return v;
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(1, |d| d.as_nanos() as u64)

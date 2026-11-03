@@ -271,7 +271,6 @@ struct Walker {
     speed: f32,
     dwell: f32,
     keeper: bool,
-    exit_y: f32,
     phase: f32,
 }
 
@@ -546,7 +545,6 @@ impl Scenario for Zoo {
                 speed,
                 dwell: 0.0,
                 keeper: false,
-                exit_y: gate_y,
                 phase,
             });
             cx.spawn(e);
@@ -562,7 +560,6 @@ impl Scenario for Zoo {
                 speed: 4.0,
                 dwell: 0.0,
                 keeper: true,
-                exit_y: gate_y,
                 phase: 0.0,
             });
             cx.spawn(e);

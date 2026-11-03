@@ -88,6 +88,8 @@ struct Car {
     vmax: f32,
     sig: Option<Id>,
     turn: bool,
+    stuck: f32,
+    box_wait: f32,
 }
 
 impl Car {
@@ -120,6 +122,7 @@ impl Car {
 
 impl Behavior for Car {
     fn update(&mut self, e: &mut Entity, cx: &mut Ctx, dt: f32) {
+        let mut boxed = false;
         let d = self.dir;
         let scale = Car::axis_scale(d);
         let (a_acc, a_brake) = (6.0 * scale, 9.0 * scale);
@@ -137,12 +140,17 @@ impl Behavior for Car {
         let ahead = cx.snap.query(probe.0, probe.1, probe.2, probe.3);
         let mut allowed = f32::MAX;
         let mut stationary_beyond: Vec<i32> = vec![];
+        // A car wedged in a junction for too long phases through crossing traffic to break gridlock.
+        let ghost = self.stuck > 5.0;
         for o in ahead.iter().filter(|o| o.kind == "car" && o.id != e.id) {
+            if ghost && (o.state % 10) as usize != d + 1 {
+                continue;
+            }
             let g = Car::gap(d, me, o.rect);
             if g >= 0 {
                 allowed = allowed.min((g - 1) as f32);
                 let speed_along = o.vel.0 * DX[d] + o.vel.1 * DY[d];
-                if speed_along.abs() < 0.4 {
+                if speed_along.abs() < 2.0 {
                     stationary_beyond.push(g);
                 }
             }
@@ -165,7 +173,9 @@ impl Behavior for Car {
             let inter_len = if d % 2 == 0 { s.rect.2 } else { s.rect.3 };
             let box_blocked =
                 stationary_beyond.iter().any(|&sg| sg >= g && sg < g + inter_len + my_len + 2);
+            let box_blocked = box_blocked && self.box_wait < 8.0;
             if must_stop || box_blocked {
+                boxed |= !must_stop;
                 allowed = allowed.min((g - 1) as f32);
             }
         }
@@ -175,14 +185,17 @@ impl Behavior for Car {
         } else {
             self.vmax.min((2.0 * a_brake * allowed).sqrt())
         };
+        self.box_wait = if boxed && self.v < 0.1 { self.box_wait + dt } else if boxed { self.box_wait } else { 0.0 };
         let dv = (target - self.v).clamp(-a_brake * dt * 1.5, a_acc * dt);
         self.v = (self.v + dv).max(0.0);
         e.vel = (DX[d] * self.v, DY[d] * self.v);
         e.data = self.v;
-        e.state = if self.emergency { 1 + d as i32 } else { 0 };
+        e.state = 1 + d as i32 + if self.emergency { 10 } else { 0 };
 
         // Right turns at intersections.
         let inside = cx.snap.query(me.0, me.1, me.2, me.3);
+        let in_box = inside.iter().any(|o| o.kind == "signal");
+        self.stuck = if in_box && self.v < 0.1 { self.stuck + dt } else { 0.0 };
         if let Some(s) = inside.iter().find(|o| o.kind == "signal") {
             if self.sig != Some(s.id) {
                 self.sig = Some(s.id);
@@ -191,12 +204,26 @@ impl Behavior for Car {
             if self.turn {
                 let (vx, hy) = (s.pos.0, s.pos.1);
                 let (x, y, w, h) = (e.pos.0, e.pos.1, me.2 as f32, me.3 as f32);
-                match d {
-                    0 if x + w >= vx + 4.0 => self.change_dir(e, 1, vx + 1.0, y),
-                    1 if y + h >= hy + 2.0 => self.change_dir(e, 2, vx, hy + 1.0),
-                    2 if x <= vx + 5.0 => self.change_dir(e, 3, vx + 5.0, hy),
-                    3 if y <= hy + 2.0 => self.change_dir(e, 0, vx + 5.0, hy + 3.0),
-                    _ => {}
+                let target = match d {
+                    0 if x + w >= vx + 4.0 => Some((1, vx + 1.0, y)),
+                    1 if y + h >= hy + 2.0 => Some((2, vx, hy + 1.0)),
+                    2 if x <= vx + 5.0 => Some((3, vx + 5.0, hy)),
+                    3 if y <= hy + 2.0 => Some((0, vx + 5.0, hy + 3.0)),
+                    _ => None,
+                };
+                if let Some((nd, nx, ny)) = target {
+                    // Only merge into the cross lane when its entry is clear; otherwise go straight.
+                    let (nw, nh) = if nd % 2 == 0 { (me.2.max(4), 1) } else { (3, me.3.max(2)) };
+                    let clear = !cx
+                        .snap
+                        .query(nx as i32 - 1, ny as i32 - 1, nw + 2, nh + 2)
+                        .iter()
+                        .any(|o| o.kind == "car" && o.id != e.id);
+                    if clear {
+                        self.change_dir(e, nd, nx, ny);
+                    } else {
+                        self.turn = false;
+                    }
                 }
             }
         }
@@ -211,6 +238,9 @@ impl Behavior for Car {
 /// Approaching emergency vehicles hold their axis green.
 struct Signal {
     t: f32,
+    /// Seconds spent preempting, and the lockout before the next preemption is allowed.
+    held: f32,
+    lockout: f32,
 }
 
 const PHASES: [(i32, f32); 6] = [(0, 9.0), (1, 2.0), (2, 1.5), (3, 9.0), (4, 2.0), (5, 1.5)];
@@ -228,10 +258,10 @@ impl Behavior for Signal {
         let r = e.rect();
         let near = cx.snap.query(r.0 - 22, r.1 - 12, r.2 + 44, r.3 + 24);
         let wanted = near.iter().find_map(|o| {
-            if o.kind != "car" || o.state == 0 {
+            if o.kind != "car" || o.state < 11 {
                 return None;
             }
-            let d = (o.state - 1) as usize;
+            let d = (o.state - 11) as usize;
             let approaching = match d {
                 0 => o.rect.0 < r.0 + r.2 && o.rect.1 >= r.1,
                 2 => o.rect.0 + o.rect.2 > r.0 && o.rect.1 >= r.1,
@@ -248,7 +278,17 @@ impl Behavior for Signal {
             })
             .find(|(end, _)| self.t < *end)
             .map_or(0, |p| p.1);
+        self.lockout = (self.lockout - dt).max(0.0);
+        if wanted.is_none() {
+            self.held = 0.0;
+        }
+        let wanted = if self.lockout > 0.0 { None } else { wanted };
         if let Some(axis) = wanted {
+            self.held += dt;
+            if self.held > 10.0 {
+                self.held = 0.0;
+                self.lockout = 25.0;
+            }
             let (green, other_green, other_yellow) =
                 if axis == 1 { (0, 3, 4) } else { (3, 0, 1) };
             if phase == green {
@@ -423,6 +463,15 @@ impl Traffic {
         true
     }
 
+    fn lane_capacity(&self, w: i32, h: i32) -> usize {
+        let lane_len = 2 * w * self.hroads.len() as i32 + 2 * h * self.vroads.len() as i32;
+        (lane_len / 18) as usize
+    }
+
+    fn initial_cap(&self, w: i32, h: i32) -> i32 {
+        self.lane_capacity(w, h) as i32 / 2
+    }
+
     fn road_background(&self, w: i32, h: i32) -> Frame {
         let mut f = Frame::filled(w as usize, h as usize, ' ', Color::White, Some(GROUND));
         let line = Color::Rgb(220, 190, 60);
@@ -489,7 +538,7 @@ impl Traffic {
         if emergency {
             vmax *= 1.4;
         }
-        let car = Car { dir, kind, color, emergency, v: if moving { vmax } else { 0.0 }, vmax, sig: None, turn: false };
+        let car = Car { dir, kind, color, emergency, v: if moving { vmax } else { 0.0 }, vmax, sig: None, turn: false, stuck: 0.0, box_wait: 0.0 };
         let mut e = Entity::new("car", sprite).at(x, y).z(10).die_offscreen().with(car);
         if emergency {
             e.anim_fps = 4.0;
@@ -626,7 +675,7 @@ impl Scenario for Traffic {
                     Entity::new("signal", Sprite::one(Frame::blank(V_ROAD_W as usize, H_ROAD_H as usize)))
                         .at(cf, rf)
                         .z(20)
-                        .with(Signal { t: offset }),
+                        .with(Signal { t: offset, held: 0.0, lockout: 0.0 }),
                 );
                 // Lamp per approach, on the sidewalk before the stop line.
                 let lamps = [
@@ -647,7 +696,7 @@ impl Scenario for Traffic {
         }
 
         // Pre-populate roads with moving traffic.
-        for _ in 0..(cx.w * cx.h / 60.0) as i32 {
+        for _ in 0..((cx.w * cx.h / 60.0) as i32).min(self.initial_cap(w, h)) {
             let lanes = self.lanes(w, h);
             let &(dir, lx, ly) = cx.rng.pick(&lanes);
             let (x, y) = match dir {
@@ -671,11 +720,14 @@ impl Scenario for Traffic {
         }
         self.spawn_acc = 0.0;
         let (w, h) = (cx.w as i32, cx.h as i32);
+        // Cap the fleet by total lane length so queues cannot spill back into gridlock.
+        let capacity = self.lane_capacity(w, h);
+        let room = cx.snap.count("car") < capacity;
         if cx.snap.count("ped") < (w / 5) as usize && cx.rng.chance(0.35) {
             self.spawn_ped(cx);
         }
         for (dir, x, y) in self.lanes(w, h) {
-            if cx.rng.chance(0.1) {
+            if room && cx.rng.chance(0.1) {
                 let (sx, sy) = match dir {
                     0 => (x + 4.0, y),
                     1 => (x, y + 2.0),
