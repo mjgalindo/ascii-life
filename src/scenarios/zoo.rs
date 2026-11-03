@@ -221,7 +221,7 @@ impl Behavior for Animal {
                 .snap
                 .query(x as i32 - 8, y as i32 - 14, 28, 22)
                 .iter()
-                .any(|o| o.kind == "visitor");
+                .any(|o| o.kind == "visitor" || o.kind == "ped");
             if watched && cx.rng.chance(0.35) {
                 cx.spawn(emote(sp.sound, e.pos.0, e.pos.1 - 1.0));
             }
@@ -381,42 +381,92 @@ impl Zoo {
         }
         f
     }
+}
 
-    fn pen_sprite(&self, pen: &Pen, sp: &Species, rng: &mut Rng) -> Sprite {
-        let (r, g, b) = sp.ground;
-        let ground = Color::Rgb(r, g, b);
-        let speck = Color::Rgb(r.saturating_sub(18), g.saturating_sub(18), b.saturating_sub(18));
-        let (w, h) = (pen.w as usize, pen.h as usize);
-        let mut f = Frame::filled(w, h, ' ', speck, Some(ground));
-        for y in 0..h {
-            for x in 0..w {
-                if rng.chance(0.03) {
-                    f.set(x, y, if sp.ground.2 > 120 { '~' } else { ',' }, speck, Some(ground));
-                }
-            }
+
+pub fn species_height(si: usize) -> i32 {
+    SPECIES[si].awake.lines().count() as i32
+}
+
+pub fn species_count() -> usize {
+    SPECIES.len()
+}
+
+/// Fenced enclosure with a sign, filled with animals of one species.
+/// `rect` is (x, y, w, h); the sign sits on the bottom fence when `sign_bottom`.
+pub fn enclosure(cx: &mut Ctx, rect: (i32, i32, i32, i32), si: usize, sign_bottom: bool) {
+    let sp = &SPECIES[si];
+    let sprite = pen_sprite(rect, sign_bottom, sp, cx.rng);
+    cx.spawn(Entity::new("pen", sprite).at(rect.0 as f32, rect.1 as f32).z(40));
+
+    let area = rect.2 * rect.3;
+    let big = sp.style == Style::Slither || sp.name == "ELEPHANT" || sp.name == "GIRAFFE";
+    let count = if big { 1 + cx.rng.int(0, 2) } else { 1 + (area / 70).max(1) + cx.rng.int(0, 2) };
+    for _ in 0..count {
+        let faces = species_faces(sp);
+        let aw = faces.awake[1].w() as f32;
+        let ah = faces.awake[1].h() as f32;
+        let b = (
+            rect.0 as f32 + 1.0,
+            rect.1 as f32 + 1.0,
+            (rect.0 + rect.2 - 1) as f32 - aw,
+            (rect.1 + rect.3 - 1) as f32 - ah,
+        );
+        let start = (cx.rng.range(b.0, b.2.max(b.0 + 0.1)), cx.rng.range(b.1, b.3.max(b.1 + 0.1)));
+        let mut a = Animal {
+            species: si,
+            faces,
+            bounds: b,
+            target: start,
+            pause: cx.rng.range(0.0, 3.0),
+            right: true,
+            sleeping: false,
+            speak_cd: cx.rng.range(2.0, 10.0),
+        };
+        a.pick_target(cx);
+        let mut ent = Entity::new("animal", a.faces.awake[1].clone()).at(start.0, start.1).z(30).with(a);
+        if sp.style == Style::Fly {
+            ent.z = 8;
         }
-        for x in 0..w {
-            for y in [0, h - 1] {
-                f.set(x, y, '=', FENCE, Some(ground));
-            }
-        }
-        for y in 0..h {
-            for x in [0, w - 1] {
-                f.set(x, y, '|', FENCE, Some(ground));
-            }
-        }
-        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
-            f.set(x, y, '+', FENCE, Some(ground));
-        }
-        // Sign on the fence nearest the path.
-        let label = format!("[ {} ]", sp.name);
-        let sy = if pen.y == 0 { h - 1 } else { 0 };
-        let sx = (w.saturating_sub(label.len())) / 2;
-        for (i, c) in label.chars().enumerate() {
-            f.set(sx + i, sy, c, Color::Rgb(250, 240, 200), Some(Color::Rgb(90, 60, 36)));
-        }
-        Sprite::one(f)
+        cx.spawn(ent);
+        cx.add("animals", 1.0);
     }
+}
+
+fn pen_sprite(rect: (i32, i32, i32, i32), sign_bottom: bool, sp: &Species, rng: &mut Rng) -> Sprite {
+    let (r, g, b) = sp.ground;
+    let ground = Color::Rgb(r, g, b);
+    let speck = Color::Rgb(r.saturating_sub(18), g.saturating_sub(18), b.saturating_sub(18));
+    let (w, h) = (rect.2 as usize, rect.3 as usize);
+    let mut f = Frame::filled(w, h, ' ', speck, Some(ground));
+    for y in 0..h {
+        for x in 0..w {
+            if rng.chance(0.03) {
+                f.set(x, y, if sp.ground.2 > 120 { '~' } else { ',' }, speck, Some(ground));
+            }
+        }
+    }
+    for x in 0..w {
+        for y in [0, h - 1] {
+            f.set(x, y, '=', FENCE, Some(ground));
+        }
+    }
+    for y in 0..h {
+        for x in [0, w - 1] {
+            f.set(x, y, '|', FENCE, Some(ground));
+        }
+    }
+    for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+        f.set(x, y, '+', FENCE, Some(ground));
+    }
+    // Sign on the fence nearest the path.
+    let label = format!("[ {} ]", sp.name);
+    let sy = if sign_bottom { h - 1 } else { 0 };
+    let sx = (w.saturating_sub(label.len())) / 2;
+    for (i, c) in label.chars().enumerate() {
+        f.set(sx + i, sy, c, Color::Rgb(250, 240, 200), Some(Color::Rgb(90, 60, 36)));
+    }
+    Sprite::one(f)
 }
 
 impl Scenario for Zoo {
@@ -461,48 +511,7 @@ impl Scenario for Zoo {
         let pens = self.pens.clone();
         for (i, pen) in pens.iter().enumerate() {
             let si = order[i % order.len()];
-            let sp = &SPECIES[si];
-            let sprite = self.pen_sprite(pen, sp, cx.rng);
-            cx.spawn(Entity::new("pen", sprite).at(pen.x as f32, pen.y as f32).z(40));
-
-            let count = if sp.style == Style::Slither || sp.name == "ELEPHANT" || sp.name == "GIRAFFE" {
-                1 + cx.rng.int(0, 2)
-            } else {
-                2 + cx.rng.int(0, 3)
-            };
-            for _ in 0..count {
-                let faces = species_faces(sp);
-                let aw = faces.awake[1].w() as f32;
-                let ah = faces.awake[1].h() as f32;
-                let b = (
-                    pen.x as f32 + 1.0,
-                    pen.y as f32 + 1.0,
-                    (pen.x + pen.w - 1) as f32 - aw,
-                    (pen.y + pen.h - 1) as f32 - ah,
-                );
-                let start = (cx.rng.range(b.0, b.2.max(b.0 + 0.1)), cx.rng.range(b.1, b.3.max(b.1 + 0.1)));
-                let mut a = Animal {
-                    species: si,
-                    faces,
-                    bounds: b,
-                    target: start,
-                    pause: cx.rng.range(0.0, 3.0),
-                    right: true,
-                    sleeping: false,
-                    speak_cd: cx.rng.range(2.0, 10.0),
-                };
-                a.pick_target(cx);
-                let mut ent = Entity::new("animal", a.faces.awake[1].clone())
-                    .at(start.0, start.1)
-                    .z(30)
-                    .with(a);
-                if sp.style == Style::Fly {
-                    ent.z = 8;
-                    ent.anim_fps = 0.0;
-                }
-                cx.spawn(ent);
-                cx.add("animals", 1.0);
-            }
+            enclosure(cx, (pen.x, pen.y, pen.w, pen.h), si, pen.y == 0);
 
             // Lamp posts on the path edge.
             let lx = (pen.x + pen.w / 2) as f32;

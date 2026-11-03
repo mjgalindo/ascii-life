@@ -3,11 +3,13 @@
 A tiny ASCII simulation engine in Rust (ratatui), in the spirit of asciiquarium. Worlds are *scenarios*: each one only defines its entities and spawn rules.
 
 ```
-cargo run --release [aquarium|traffic|zoo|village]
+cargo run --release [aquarium|traffic|zoo|village|city]
 cargo run --release -- --dump zoo 30 120 40   # headless: print one frame after 30s
 ```
 
-Keys: `tab`/`1-4` switch world, `r` reset, `space` pause, `+`/`-` speed, `q` quit.
+The `city` world combines them all: every city block is a diorama (zoo pen, fish tank, farmstead, park) between signalised roads with cars, pedestrians and emergency vehicles.
+
+Keys: `tab`/`1-5` switch world, `r` reset, `space` pause, `+`/`-` speed, `q` quit.
 
 ## Engine (`src/engine`)
 

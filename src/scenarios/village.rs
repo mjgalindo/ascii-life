@@ -8,8 +8,8 @@ const SEASON_NAMES: [&str; 4] = ["spring", "summer", "autumn", "winter"];
 const GROUND: [Color; 4] = [rgb(74, 124, 62), rgb(64, 114, 48), rgb(116, 104, 52), rgb(206, 214, 228)];
 
 /// Fraction of the day with 0.0 = midnight and 0.5 = noon, aligned with the engine's daylight wave.
-fn clock(t: f32) -> f32 {
-    (t / DAY + 0.4).fract()
+fn clock(t: f32, day: f32) -> f32 {
+    (t / day + 0.4).fract()
 }
 
 fn season(t: f32) -> usize {
@@ -76,6 +76,7 @@ fn goal_for(job: Job, c: f32) -> Goal {
 }
 
 struct Villager {
+    day: f32,
     job: Job,
     home: (f32, f32),
     work: (f32, f32),
@@ -101,7 +102,7 @@ impl Villager {
 
 impl Behavior for Villager {
     fn update(&mut self, e: &mut Entity, cx: &mut Ctx, dt: f32) {
-        let c = clock(cx.time);
+        let c = clock(cx.time, self.day);
         let goal = goal_for(self.job, c);
         let base = self.target_base(goal);
         self.spot_cd -= dt;
@@ -391,6 +392,91 @@ fn place(
     None
 }
 
+fn make_villager(
+    cx: &mut Ctx,
+    job: Job,
+    home: (f32, f32),
+    work: (f32, f32),
+    social: (f32, f32),
+    start: (f32, f32),
+    day: f32,
+) {
+    let (g, col) = job.glyph();
+    let mut f = Frame::blank(1, 2);
+    f.set(0, 0, 'o', rgb(235, 200, 160), None);
+    f.set(0, 1, g, col, None);
+    let body = Sprite::one(f);
+    let villager = Villager {
+        day,
+        job,
+        home,
+        work,
+        social,
+        goal_spot: home,
+        hidden: false,
+        body: body.clone(),
+        speed: cx.rng.range(3.0, 5.0),
+        spot_cd: 0.0,
+        work_cd: cx.rng.range(1.0, 6.0),
+        trail_cd: cx.rng.range(0.0, 1.0),
+    };
+    let mut e = Entity::new("villager", body).at(start.0, start.1).z(20).with(villager);
+    e.state = job as i32;
+    cx.spawn(e);
+    cx.add("pop", 1.0);
+}
+
+fn pick_chicken(cx: &mut Ctx, x: f32, y: f32) {
+    let hen = Sprite::mono("c'", rgb(240, 230, 210)).facing(cx.rng.chance(0.5));
+    cx.spawn(Entity::new("chicken", hen).at(x, y).z(22).with(Chicken { cd: 0.0, target: (x, y) }));
+}
+
+/// A small farmstead: house with chimney, a field, a farmer and some hens.
+pub fn yard(cx: &mut Ctx, rect: (i32, i32, i32, i32), day: f32) {
+    let (x, y, w, h) = rect;
+    if h < 6 || w < 16 {
+        return;
+    }
+    let sprite = frames_for(HOUSE, 3, rgb(176, 60, 50), rgb(150, 120, 90));
+    let (hx, hy) = (x + 1, y + h - 5);
+    cx.spawn(Entity::new("house", sprite).at(hx as f32, hy as f32).z(40).with(Lit));
+    cx.spawn(
+        Entity::new("chimney", Sprite::new(vec![Frame::blank(1, 1), Frame::blank(1, 1)]))
+            .at(hx as f32, hy as f32)
+            .with(Chimney),
+    );
+    let fw = (w - 12).clamp(6, 14);
+    let growth = cx.rng.f();
+    cx.spawn(
+        Entity::new("field", field_sprite(fw as usize))
+            .at((x + 11) as f32, (y + h - 4) as f32)
+            .z(70)
+            .with(Field { growth }),
+    );
+    let home = ((hx + 4) as f32, (hy + 5).min(y + h - 1) as f32);
+    let work = ((x + 11 + fw / 2) as f32, (y + h - 1) as f32);
+    make_villager(cx, Job::Farmer, home, work, home, home, day);
+    pick_chicken(cx, (x + 10) as f32, (y + 1) as f32);
+    let trees = tree_sprite();
+    cx.spawn(Entity::new("tree", trees).at((x + w - 6) as f32, y as f32).z(45).with(Tree));
+}
+
+/// A pocket park with trees and a bench.
+pub fn park(cx: &mut Ctx, rect: (i32, i32, i32, i32)) {
+    let (x, y, w, h) = rect;
+    let trees = tree_sprite();
+    for _ in 0..(w * h / 24).max(2) {
+        let tx = cx.rng.int(x, (x + w - 5).max(x + 1));
+        let ty = cx.rng.int(y, (y + h - 3).max(y + 1));
+        cx.spawn(Entity::new("tree", trees.clone()).at(tx as f32, ty as f32).z(45).with(Tree));
+    }
+    cx.spawn(
+        Entity::new("bench", Sprite::mono("[====]", rgb(150, 100, 60)))
+            .at((x + w / 2 - 3) as f32, (y + h - 1) as f32)
+            .z(46),
+    );
+}
+
 impl Village {
     fn spawn_villager(&self, cx: &mut Ctx, job: Job, home: (f32, f32), at_home: bool) {
         let work = self
@@ -406,33 +492,13 @@ impl Village {
         } else {
             *cx.rng.pick(&work)
         };
-        let (g, col) = job.glyph();
-        let mut f = Frame::blank(1, 2);
-        f.set(0, 0, 'o', rgb(235, 200, 160), None);
-        f.set(0, 1, g, col, None);
-        let body = Sprite::one(f);
-        let villager = Villager {
-            job,
-            home,
-            work: workspot,
-            social: (self.tavern.0 + cx.rng.range(-2.0, 2.0), self.tavern.1),
-            goal_spot: home,
-            hidden: false,
-            body: body.clone(),
-            speed: cx.rng.range(3.0, 5.0),
-            spot_cd: 0.0,
-            work_cd: cx.rng.range(1.0, 6.0),
-            trail_cd: cx.rng.range(0.0, 1.0),
-        };
+        let social = (self.tavern.0 + cx.rng.range(-2.0, 2.0), self.tavern.1);
         let start = if at_home {
             home
         } else {
             (cx.rng.range(2.0, cx.w - 3.0), cx.rng.range(2.0, cx.h - 4.0))
         };
-        let mut e = Entity::new("villager", body).at(start.0, start.1).z(20).with(villager);
-        e.state = job as i32;
-        cx.spawn(e);
-        cx.add("pop", 1.0);
+        make_villager(cx, job, home, workspot, social, start, DAY);
     }
 }
 
@@ -573,10 +639,7 @@ impl Scenario for Village {
 
         for _ in 0..(3 + w / 20) {
             let (x, y) = (cx.rng.range(5.0, cx.w - 5.0), cx.rng.range(3.0, cx.h - 4.0));
-            let hen = Sprite::mono("c'", rgb(240, 230, 210)).facing(cx.rng.chance(0.5));
-            cx.spawn(
-                Entity::new("chicken", hen).at(x, y).z(22).with(Chicken { cd: 0.0, target: (x, y) }),
-            );
+            pick_chicken(cx, x, y);
         }
         let _ = Weather;
     }

@@ -9,6 +9,7 @@ const H_ROAD_H: i32 = 5;
 const X0: i32 = 6;
 const Y0: i32 = 3;
 
+const CITY_DAY: f32 = 120.0;
 const ASPHALT: Color = Color::Rgb(58, 58, 64);
 const SIDEWALK: Color = Color::Rgb(118, 118, 124);
 const GROUND: Color = Color::Rgb(44, 66, 46);
@@ -378,6 +379,8 @@ fn tree(rng: &mut Rng) -> Sprite {
 }
 
 pub struct Traffic {
+    /// When set, city blocks become small dioramas instead of plain buildings.
+    city: bool,
     vroads: Vec<i32>,
     hroads: Vec<i32>,
     spawn_acc: f32,
@@ -385,11 +388,41 @@ pub struct Traffic {
 
 impl Default for Traffic {
     fn default() -> Self {
-        Traffic { vroads: vec![], hroads: vec![], spawn_acc: 0.0 }
+        Traffic { city: false, vroads: vec![], hroads: vec![], spawn_acc: 0.0 }
     }
 }
 
 impl Traffic {
+    pub fn city() -> Traffic {
+        Traffic { city: true, ..Traffic::default() }
+    }
+
+    /// Fills a block with a themed diorama; returns false when the block is too small.
+    fn diorama(&self, cx: &mut Ctx, rect: (i32, i32, i32, i32)) -> bool {
+        let (_, _, bw, bh) = rect;
+        if bw < 16 || bh < 6 {
+            return false;
+        }
+        let roll = cx.rng.f();
+        if roll < 0.32 {
+            let fits: Vec<usize> = (0..super::zoo::species_count())
+                .filter(|&i| super::zoo::species_height(i) <= bh - 3)
+                .collect();
+            let si = *cx.rng.pick(&fits);
+            let sign_bottom = cx.rng.chance(0.5);
+            super::zoo::enclosure(cx, rect, si, sign_bottom);
+        } else if roll < 0.50 {
+            super::aquarium::tank(cx, rect);
+        } else if roll < 0.72 {
+            super::village::yard(cx, rect, CITY_DAY);
+        } else if roll < 0.86 {
+            super::village::park(cx, rect);
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn road_background(&self, w: i32, h: i32) -> Frame {
         let mut f = Frame::filled(w as usize, h as usize, ' ', Color::White, Some(GROUND));
         let line = Color::Rgb(220, 190, 60);
@@ -502,7 +535,7 @@ impl Traffic {
 
 impl Scenario for Traffic {
     fn name(&self) -> &'static str {
-        "traffic"
+        if self.city { "city" } else { "traffic" }
     }
 
     fn background(&self) -> Color {
@@ -516,10 +549,11 @@ impl Scenario for Traffic {
     fn hud(&self, g: &Globals, daylight: f32) -> String {
         let t = |k| g.get(k).copied().unwrap_or(0.0) as i32;
         format!(
-            "cars {} (waiting {}) walkers {} trips {} | {}",
+            "cars {} (waiting {}) walkers {} animals {} trips {} | {}",
             t("cars"),
             t("waiting"),
             t("walkers"),
+            t("animals"),
             t("trips"),
             if daylight > 0.45 { "day" } else { "night" }
         )
@@ -553,6 +587,9 @@ impl Scenario for Traffic {
             for &(y0, y1) in &rows {
                 let (bw, bh) = (x1 - x0, y1 - y0);
                 if bw < 5 || bh < 3 {
+                    continue;
+                }
+                if self.city && self.diorama(cx, (x0, y0, bw, bh)) {
                     continue;
                 }
                 if cx.rng.chance(0.18) {

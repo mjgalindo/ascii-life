@@ -236,3 +236,87 @@ impl Scenario for Aquarium {
         }
     }
 }
+
+/// Fish confined to a glass tank; turns around at the walls.
+struct TankFish {
+    bounds: (f32, f32, f32, f32),
+    sprites: [Sprite; 2],
+    right: bool,
+    speed: f32,
+    phase: f32,
+}
+
+impl Behavior for TankFish {
+    fn update(&mut self, e: &mut Entity, cx: &mut Ctx, _dt: f32) {
+        let b = self.bounds;
+        if (self.right && e.pos.0 >= b.2) || (!self.right && e.pos.0 <= b.0) {
+            self.right = !self.right;
+            e.set_sprite(self.sprites[self.right as usize].clone());
+        }
+        e.vel.0 = if self.right { self.speed } else { -self.speed };
+        e.vel.1 = (e.age * 1.1 + self.phase).sin() * 0.7;
+        e.pos.1 = e.pos.1.clamp(b.1, b.3);
+        if cx.rng.chance(0.004) {
+            let bx = e.pos.0 + if self.right { e.w() } else { -1.0 };
+            cx.spawn(
+                Entity::new("bubble", Sprite::mono("o", Color::Rgb(200, 235, 255)))
+                    .at(bx, e.pos.1)
+                    .vel(0.0, -3.0)
+                    .z(7)
+                    .lifetime(((e.pos.1 - b.1) / 3.0).max(0.2)),
+            );
+        }
+    }
+}
+
+/// Glass tank with sand, swaying weed and a handful of fish. `rect` is (x, y, w, h).
+pub fn tank(cx: &mut Ctx, rect: (i32, i32, i32, i32)) {
+    let (x, y, w, h) = rect;
+    if w < 8 || h < 5 {
+        return;
+    }
+    let water = Color::Rgb(14, 62, 120);
+    let glass = Color::Rgb(160, 220, 235);
+    let sand = Color::Rgb(170, 146, 96);
+    let mut f = Frame::filled(w as usize, h as usize, ' ', glass, Some(water));
+    for xx in 0..w as usize {
+        f.set(xx, 0, '=', glass, Some(water));
+        f.set(xx, h as usize - 1, '=', glass, Some(sand));
+        f.set(xx, h as usize - 2, if xx % 3 == 0 { '.' } else { ' ' }, Color::Rgb(120, 100, 60), Some(sand));
+    }
+    for yy in 0..h as usize {
+        f.set(0, yy, '|', glass, Some(water));
+        f.set(w as usize - 1, yy, '|', glass, Some(water));
+    }
+    cx.spawn(Entity::new("tank", Sprite::one(f)).at(x as f32, y as f32).z(40));
+
+    for _ in 0..(w / 6) {
+        let wx = cx.rng.int(x + 2, x + w - 3) as f32;
+        let weed = Sprite::anim(&[("(\n )", "g \n g"), (" (\n)", " g\ng ")]);
+        let rate = 1.0 + cx.rng.f();
+        cx.spawn(Entity::new("seaweed", weed).at(wx, (y + h - 4) as f32).z(8).fps(rate));
+    }
+
+    let fish = (w / 5).clamp(2, 6);
+    for _ in 0..fish {
+        let (shape, mask) = *cx.rng.pick(&FISH_ART[..4]);
+        let body = std_palette(*cx.rng.pick(TINTS)).unwrap();
+        let mut digits = [Color::White; 9];
+        digits[1] = body;
+        let right = Sprite::art_d(shape, mask, &digits);
+        let sprites = [right.mirrored(), right.clone()];
+        let fw = right.w() as f32;
+        let fh = right.h() as f32;
+        let bounds = ((x + 1) as f32, (y + 1) as f32, (x + w - 1) as f32 - fw, (y + h - 3) as f32 - fh);
+        let start = (cx.rng.range(bounds.0, bounds.2), cx.rng.range(bounds.1, bounds.3.max(bounds.1 + 0.1)));
+        let dir = cx.rng.chance(0.5);
+        let speed = cx.rng.range(2.0, 6.0);
+        let phase = cx.rng.range(0.0, 6.0);
+        cx.spawn(
+            Entity::new("tankfish", sprites[dir as usize].clone())
+                .at(start.0, start.1)
+                .z(7)
+                .with(TankFish { bounds, sprites, right: dir, speed, phase }),
+        );
+    }
+}
