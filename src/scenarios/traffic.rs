@@ -709,10 +709,10 @@ impl Scenario for Traffic {
 
     fn tick(&mut self, cx: &mut Ctx, dt: f32) {
         let waiting = cx.snap.of_kind("car").filter(|c| c.data < 0.3).count();
-        cx.globals.insert("cars", cx.snap.count("car") as f32);
-        cx.globals.insert("waiting", waiting as f32);
+        cx.set("cars", cx.snap.count("car") as f32);
+        cx.set("waiting", waiting as f32);
 
-        cx.globals.insert("walkers", cx.snap.count("ped") as f32);
+        cx.set("walkers", cx.snap.count("ped") as f32);
 
         self.spawn_acc += dt;
         if self.spawn_acc < 0.25 {

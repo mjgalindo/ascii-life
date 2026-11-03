@@ -532,7 +532,7 @@ impl Scenario for Village {
         let mut rects: Vec<(i32, i32, i32, i32)> = vec![];
         self.plaza = (cx.w / 2.0, cx.h / 2.0);
         rects.push((w / 2 - 8, h / 2 - 4, 16, 8));
-        cx.globals.insert("food", 20.0);
+        cx.set("food", 20.0);
 
         // Well at the heart of the plaza.
         cx.spawn(
@@ -646,13 +646,13 @@ impl Scenario for Village {
 
     fn tick(&mut self, cx: &mut Ctx, dt: f32) {
         self.season = season(cx.time);
-        cx.globals.insert("season", self.season as f32);
+        cx.set("season", self.season as f32);
 
         // Food is eaten gradually; surplus lets the village grow.
         let pop = cx.snap.count("villager") as f32;
         cx.add("food", -pop * 0.012 * dt);
         if cx.global("food") < 0.0 {
-            cx.globals.insert("food", 0.0);
+            cx.set("food", 0.0);
         }
 
         self.births_cd -= dt;

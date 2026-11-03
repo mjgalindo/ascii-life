@@ -521,7 +521,7 @@ impl Scenario for Zoo {
     }
 
     fn tick(&mut self, cx: &mut Ctx, dt: f32) {
-        cx.globals.insert("visitors", cx.snap.count("visitor") as f32);
+        cx.set("visitors", cx.snap.count("visitor") as f32);
         self.spawn_cd -= dt;
         self.keeper_cd -= dt;
         let open = cx.daylight > 0.4;

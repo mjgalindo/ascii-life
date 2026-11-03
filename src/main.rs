@@ -13,6 +13,10 @@ use ratatui::widgets::Paragraph;
 use std::time::{Duration, Instant};
 
 const FRAME: Duration = Duration::from_millis(33);
+/// Fixed simulation step; speed-ups run more steps, never longer ones.
+const STEP: f32 = 1.0 / 30.0;
+/// Share of each frame that fast-forward may spend simulating.
+const SIM_BUDGET: Duration = Duration::from_millis(26);
 
 fn seed() -> u64 {
     if let Some(v) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
@@ -52,8 +56,39 @@ fn dump(args: &[String]) {
     println!("-- {} ents, globals {:?}", world.ents.len(), world.globals);
 }
 
+/// Headless throughput test: `--bench <scenario> <sim-seconds> [w h]`.
+fn bench(args: &[String]) {
+    let index = scenarios::NAMES.iter().position(|n| n.starts_with(args[0].as_str())).unwrap_or(0);
+    let secs: f32 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(60.0);
+    let w: i32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(400);
+    let h: i32 = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(120);
+    let mut world = build(index, w, h);
+    let steps = (secs * 30.0) as u64;
+    let start = Instant::now();
+    for _ in 0..steps {
+        world.tick(1.0 / 30.0);
+    }
+    let el = start.elapsed().as_secs_f64();
+    println!(
+        "{} {}x{}: {} entities, {} ticks in {:.2}s = {:.0} ticks/s ({:.0}x realtime), {} threads",
+        world.scenario_name(),
+        w,
+        h,
+        world.ents.len(),
+        steps,
+        el,
+        steps as f64 / el,
+        steps as f64 / el / 30.0,
+        rayon::current_num_threads()
+    );
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--bench") {
+        bench(&args[1..]);
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "--dump") {
         dump(&args[1..]);
         return Ok(());
@@ -71,6 +106,9 @@ fn main() -> std::io::Result<()> {
     let mut world = build(index, size.width as i32, size.height as i32 - 1);
     let mut paused = false;
     let mut speed = 1.0f32;
+    let mut turbo = false;
+    let mut debt = 0.0f32;
+    let mut effective = 1.0f32;
     let mut last = Instant::now();
 
     let result = (|| -> std::io::Result<()> {
@@ -93,11 +131,11 @@ fn main() -> std::io::Result<()> {
                     }),
                 };
                 let line = format!(
-                    " {} | {}{} x{:.1} | {} ents | {} | tab:next click:inspect r:reset space:pause +/-:speed q:quit",
+                    " {} | {}{} | {:.1}x | {} ents | {} | tab:next click:inspect r:reset space:pause +/-:speed t:turbo q:quit",
                     world.scenario_name(),
                     if paused { "PAUSED " } else { "" },
-                    "",
-                    speed,
+                    if turbo { "TURBO" } else { "" },
+                    effective,
                     world.ents.len(),
                     extra
                 );
@@ -128,8 +166,9 @@ fn main() -> std::io::Result<()> {
                                     { world = build(index, w, h); selected = None; }
                                 }
                             }
-                            KeyCode::Char('+') | KeyCode::Char('=') => speed = (speed * 1.5).min(16.0),
-                            KeyCode::Char('-') => speed = (speed / 1.5).max(0.1),
+                            KeyCode::Char('+') | KeyCode::Char('=') => speed = (speed * 2.0).min(1.0e6),
+                            KeyCode::Char('t') => turbo = !turbo,
+                            KeyCode::Char('-') => speed = (speed / 2.0).max(0.125),
                             _ => {}
                         }
                     }
@@ -145,14 +184,21 @@ fn main() -> std::io::Result<()> {
             }
 
             if last.elapsed() >= FRAME {
-                let dt = last.elapsed().as_secs_f32().min(0.1);
+                let real = last.elapsed().as_secs_f32().min(0.1);
                 last = Instant::now();
                 if !paused {
-                    // Sub-step at high speed so fast-forward stays stable.
-                    let steps = speed.ceil().max(1.0) as i32;
-                    for _ in 0..steps {
-                        world.tick(dt * speed / steps as f32);
+                    let started = Instant::now();
+                    let sim_before = world.time;
+                    debt += real * speed;
+                    // Turbo ignores the requested speed and simulates for the whole budget.
+                    while (turbo || debt >= STEP) && started.elapsed() < SIM_BUDGET {
+                        world.tick(STEP);
+                        debt -= STEP;
                     }
+                    // Past the budget the requested speed is unreachable; drop the backlog.
+                    debt = if turbo { 0.0 } else { debt.clamp(0.0, 2.0 * STEP) };
+                    let achieved = (world.time - sim_before) / real.max(0.001);
+                    effective = effective * 0.8 + achieved * 0.2;
                 }
             }
         }

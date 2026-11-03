@@ -1,5 +1,6 @@
 use ratatui::style::Color;
-use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
+
 
 /// One animation frame: a character grid with per-cell colors.
 /// A cell is transparent when its glyph is a space and it has no background.
@@ -10,6 +11,42 @@ pub struct Frame {
     pub ch: Vec<char>,
     pub fg: Vec<Color>,
     pub bg: Vec<Option<Color>>,
+    /// Lazily rasterized pixel form, used by the half-block renderer.
+    pix: OnceLock<Arc<PixFrame>>,
+}
+
+/// Square-pixel image; one terminal cell covers 1 pixel across and 2 down.
+#[derive(Clone)]
+pub struct PixFrame {
+    pub w: usize,
+    pub h: usize,
+    pub px: Vec<Option<Color>>,
+}
+
+impl PixFrame {
+    /// Builds a frame from rows of palette keys. Space and `.` are transparent.
+    pub fn parse(rows: &str, palette: &[(char, Color)]) -> PixFrame {
+        let lines: Vec<Vec<char>> = rows.lines().map(|l| l.chars().collect()).collect();
+        let h = lines.len();
+        let w = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+        let mut px = vec![None; w * h];
+        for (y, l) in lines.iter().enumerate() {
+            for (x, &c) in l.iter().enumerate() {
+                px[y * w + x] = palette.iter().find(|(k, _)| *k == c).map(|(_, col)| *col);
+            }
+        }
+        PixFrame { w, h, px }
+    }
+
+    pub fn mirrored(&self) -> PixFrame {
+        let mut px = vec![None; self.w * self.h];
+        for y in 0..self.h {
+            for x in 0..self.w {
+                px[y * self.w + (self.w - 1 - x)] = self.px[y * self.w + x];
+            }
+        }
+        PixFrame { w: self.w, h: self.h, px }
+    }
 }
 
 pub const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -77,11 +114,12 @@ impl Frame {
             ch: vec![' '; w * h],
             fg: vec![Color::White; w * h],
             bg: vec![None; w * h],
+            pix: OnceLock::new(),
         }
     }
 
     pub fn filled(w: usize, h: usize, ch: char, fg: Color, bg: Option<Color>) -> Frame {
-        Frame { w, h, ch: vec![ch; w * h], fg: vec![fg; w * h], bg: vec![bg; w * h] }
+        Frame { w, h, ch: vec![ch; w * h], fg: vec![fg; w * h], bg: vec![bg; w * h], pix: OnceLock::new() }
     }
 
     pub fn set(&mut self, x: usize, y: usize, ch: char, fg: Color, bg: Option<Color>) {
@@ -99,6 +137,29 @@ impl Frame {
         }
     }
 
+    /// Pixel rendition: each glyph becomes chunky pixels shaped by how much of the cell it fills.
+    pub fn to_pix(&self) -> Arc<PixFrame> {
+        self.pix
+            .get_or_init(|| {
+                let mut px = vec![None; self.w * self.h * 2];
+                for y in 0..self.h {
+                    for x in 0..self.w {
+                        let i = y * self.w + x;
+                        let (top, bottom) = glyph_pixels(self.ch[i]);
+                        let bg = self.bg[i];
+                        let (t, b) = (
+                            if top { Some(self.fg[i]) } else { bg },
+                            if bottom { Some(self.fg[i]) } else { bg },
+                        );
+                        px[(y * 2) * self.w + x] = t;
+                        px[(y * 2 + 1) * self.w + x] = b;
+                    }
+                }
+                Arc::new(PixFrame { w: self.w, h: self.h * 2, px })
+            })
+            .clone()
+    }
+
     /// Horizontal mirror with directional glyphs swapped, so one sprite serves both facings.
     pub fn mirrored(&self) -> Frame {
         let mut out = Frame::blank(self.w, self.h);
@@ -112,6 +173,16 @@ impl Frame {
             }
         }
         out
+    }
+}
+
+/// Which vertical halves of a cell a glyph inks.
+fn glyph_pixels(c: char) -> (bool, bool) {
+    match c {
+        ' ' => (false, false),
+        '`' | '\'' | '"' | '^' | '*' => (true, false),
+        '_' | '.' | ',' | 'v' => (false, true),
+        _ => (true, true),
     }
 }
 
@@ -140,12 +211,14 @@ fn flip_glyph(c: char) -> char {
 /// A shared, cheaply clonable set of animation frames.
 #[derive(Clone)]
 pub struct Sprite {
-    pub frames: Rc<Vec<Frame>>,
+    pub frames: Arc<Vec<Frame>>,
+    /// Hand-drawn pixel art; when absent the ASCII frames are rasterized.
+    pub pixels: Option<Arc<Vec<PixFrame>>>,
 }
 
 impl Sprite {
     pub fn new(frames: Vec<Frame>) -> Sprite {
-        Sprite { frames: Rc::new(frames) }
+        Sprite { frames: Arc::new(frames), pixels: None }
     }
 
     pub fn one(frame: Frame) -> Sprite {
@@ -178,7 +251,23 @@ impl Sprite {
     }
 
     pub fn mirrored(&self) -> Sprite {
-        Sprite::new(self.frames.iter().map(|f| f.mirrored()).collect())
+        let mut s = Sprite::new(self.frames.iter().map(|f| f.mirrored()).collect());
+        s.pixels = self.pixels.as_ref().map(|p| Arc::new(p.iter().map(|f| f.mirrored()).collect()));
+        s
+    }
+
+    /// Attaches hand-drawn pixel frames (one per ASCII frame) for the pixel renderer.
+    pub fn with_pixels(mut self, frames: Vec<PixFrame>) -> Sprite {
+        self.pixels = Some(Arc::new(frames));
+        self
+    }
+
+    /// Pixel frame for animation frame `i`, falling back to rasterized ASCII.
+    pub fn pixel_frame(&self, i: usize) -> Arc<PixFrame> {
+        match &self.pixels {
+            Some(p) if !p.is_empty() => Arc::new(p[i.min(p.len() - 1)].clone()),
+            _ => self.frames[i.min(self.frames.len() - 1)].to_pix(),
+        }
     }
 
     /// Returns the sprite facing right when `right` is true, otherwise mirrored.

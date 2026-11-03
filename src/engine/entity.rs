@@ -3,8 +3,15 @@ use super::world::Ctx;
 
 pub type Id = u64;
 
+/// Kinds that are decoration by convention; they are skipped by neighbor queries
+/// (override with `.scenery()` or by assigning the field).
+const SCENERY_KINDS: &[&str] = &[
+    "road", "ground", "building", "tree", "pen", "tank", "lamp", "well", "bench", "seaweed", "emote",
+    "smoke", "rain", "snow", "trail", "house", "field", "chimney", "bubble",
+];
+
 /// Per-entity logic. Every hook is optional; entities without a behavior simply drift with `vel`.
-pub trait Behavior {
+pub trait Behavior: Send {
     fn update(&mut self, _e: &mut Entity, _cx: &mut Ctx, _dt: f32) {}
     fn on_collide(&mut self, _e: &mut Entity, _other: &Info, _cx: &mut Ctx) {}
     fn on_death(&mut self, _e: &Entity, _cx: &mut Ctx) {}
@@ -39,6 +46,8 @@ pub struct Entity {
     pub data: f32,
     pub state: i32,
     pub follow: Option<Follow>,
+    /// Decoration that no behavior needs to discover; kept out of the neighbor index.
+    pub scenery: bool,
     pub alive: bool,
     pub behavior: Option<Box<dyn Behavior>>,
 }
@@ -64,6 +73,7 @@ impl Entity {
             data: 0.0,
             state: 0,
             follow: None,
+            scenery: SCENERY_KINDS.contains(&kind),
             alive: true,
             behavior: None,
         }
@@ -108,6 +118,10 @@ impl Entity {
     }
     pub fn follow(mut self, parent: Id, dx: f32, dy: f32) -> Self {
         self.follow = Some(Follow { parent, dx, dy });
+        self
+    }
+    pub fn scenery(mut self) -> Self {
+        self.scenery = true;
         self
     }
     pub fn with(mut self, b: impl Behavior + 'static) -> Self {
