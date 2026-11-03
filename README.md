@@ -9,7 +9,7 @@ cargo run --release -- --dump zoo 30 120 40   # headless: print one frame after 
 
 The `city` world combines them all: every city block is a diorama (zoo pen, fish tank, farmstead, park) between signalised roads with cars, pedestrians and emergency vehicles.
 
-Keys: `tab`/`1-5` switch world, `r` reset, `space` pause, `+`/`-` speed, `q` quit.
+Keys: `tab`/`1-5` switch world, click inspects an entity, `r` reset, `space` pause, `+`/`-` speed, `q` quit.
 
 ## Engine (`src/engine`)
 
