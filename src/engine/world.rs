@@ -2,7 +2,7 @@ use super::entity::{Entity, Id, Info};
 use super::rng::Rng;
 use ratatui::style::Color;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 pub type Globals = BTreeMap<&'static str, f32>;
 
@@ -173,6 +173,29 @@ pub fn overlaps(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
 const CHUNK: usize = 192;
 /// Chunk slot reserved for work done on the calling thread.
 const MAIN_SLOT: u64 = 0xFFF;
+/// Chunk slot reserved for viewer actions.
+const VIEWER_SLOT: u64 = 0xFFE;
+/// Headlines kept for the log panel.
+const NEWS_KEPT: usize = 200;
+
+/// A notable happening, optionally tied to a place the camera can jump to.
+#[derive(Clone)]
+pub struct News {
+    pub time: f64,
+    pub text: String,
+    pub pos: Option<(f32, f32)>,
+}
+
+/// Read-only tick parameters shared by every work unit.
+#[derive(Clone, Copy)]
+struct TickEnv<'a> {
+    w: f32,
+    h: f32,
+    time: f64,
+    daylight: f32,
+    snap: &'a Snapshot,
+    base: &'a Globals,
+}
 
 /// Everything a behavior or scenario may touch during a tick.
 /// Writes (spawns, kills, global changes) are buffered and merged after each phase.
@@ -180,7 +203,8 @@ pub struct Ctx<'a> {
     pub rng: &'a mut Rng,
     pub w: f32,
     pub h: f32,
-    pub time: f32,
+    /// Seconds since the world began; double precision so long fast-forwards keep ticking.
+    pub time: f64,
     /// 1.0 at noon, 0.0 at midnight; constant 1.0 for scenarios without a day cycle.
     pub daylight: f32,
     pub snap: &'a Snapshot,
@@ -191,6 +215,7 @@ pub struct Ctx<'a> {
     id_next: u64,
     spawned: Vec<Entity>,
     killed: Vec<Id>,
+    news: Vec<News>,
 }
 
 /// Buffered output of one work unit.
@@ -199,39 +224,36 @@ struct Out {
     killed: Vec<Id>,
     adds: Globals,
     sets: Globals,
+    news: Vec<News>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(
-        rng: &'a mut Rng,
-        w: f32,
-        h: f32,
-        time: f32,
-        daylight: f32,
-        snap: &'a Snapshot,
-        base: &'a Globals,
-        epoch: u64,
-        slot: u64,
-    ) -> Ctx<'a> {
+    fn new(rng: &'a mut Rng, env: TickEnv<'a>, epoch: u64, slot: u64) -> Ctx<'a> {
         Ctx {
             rng,
-            w,
-            h,
-            time,
-            daylight,
-            snap,
-            base,
+            w: env.w,
+            h: env.h,
+            time: env.time,
+            daylight: env.daylight,
+            snap: env.snap,
+            base: env.base,
             adds: Globals::new(),
             sets: Globals::new(),
             id_base: (epoch << 32) | (slot << 20),
             id_next: 0,
             spawned: vec![],
             killed: vec![],
+            news: vec![],
         }
     }
 
     fn finish(self) -> Out {
-        Out { spawned: self.spawned, killed: self.killed, adds: self.adds, sets: self.sets }
+        Out { spawned: self.spawned, killed: self.killed, adds: self.adds, sets: self.sets, news: self.news }
+    }
+
+    /// Publishes a headline; `pos` lets the viewer jump to where it happened.
+    pub fn news(&mut self, text: impl Into<String>, pos: Option<(f32, f32)>) {
+        self.news.push(News { time: self.time, text: text.into(), pos });
     }
 
     pub fn spawn(&mut self, mut e: Entity) -> Id {
@@ -280,6 +302,16 @@ pub trait Scenario {
     fn preferred_size(&self) -> Option<(i32, i32)> {
         None
     }
+    /// Things the viewer can add to this world, listed in the add menu.
+    fn tools(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Carries out entry `tool` of `tools` at a world position.
+    fn place(&mut self, _cx: &mut Ctx, _tool: usize, _x: f32, _y: f32) {}
+    /// Whether the world is exactly as large as the screen, with no scrolling.
+    fn fits_terminal(&self) -> bool {
+        false
+    }
     /// Extra status text for the HUD.
     fn hud(&self, _globals: &Globals, _daylight: f32) -> String {
         String::new()
@@ -291,11 +323,13 @@ pub struct World {
     pub h: i32,
     pub ents: Vec<Entity>,
     pub rng: Rng,
-    pub time: f32,
+    pub time: f64,
     pub daylight: f32,
     pub globals: Globals,
+    pub news: VecDeque<News>,
     pub scenario: Option<Box<dyn Scenario>>,
     pub ticks: u64,
+    placed: u64,
     seed: u64,
 }
 
@@ -309,8 +343,10 @@ impl World {
             time: 0.0,
             daylight: 1.0,
             globals: Globals::new(),
+            news: VecDeque::new(),
             scenario: Some(scenario),
             ticks: 0,
+            placed: 0,
             seed,
         };
         world.setup();
@@ -322,9 +358,15 @@ impl World {
         let mut scen = self.scenario.take().unwrap();
         self.daylight = day_factor(scen.as_ref(), 0.0);
         let base = self.globals.clone();
-        let mut cx = Ctx::new(
-            &mut self.rng, self.w as f32, self.h as f32, 0.0, self.daylight, &snap, &base, 0, MAIN_SLOT,
-        );
+        let env = TickEnv {
+            w: self.w as f32,
+            h: self.h as f32,
+            time: 0.0,
+            daylight: self.daylight,
+            snap: &snap,
+            base: &base,
+        };
+        let mut cx = Ctx::new(&mut self.rng, env, 0, MAIN_SLOT);
         scen.setup(&mut cx);
         let out = cx.finish();
         self.merge(vec![out]);
@@ -333,6 +375,8 @@ impl World {
 
     /// Folds buffered phase outputs into the world in a fixed order.
     fn merge(&mut self, outs: Vec<Out>) {
+        let mut killed: HashSet<Id, std::hash::BuildHasherDefault<FastHasher>> = HashSet::default();
+        let mut spawned = vec![];
         for mut o in outs {
             for (k, v) in o.sets {
                 self.globals.insert(k, v);
@@ -340,13 +384,37 @@ impl World {
             for (k, v) in o.adds {
                 *self.globals.entry(k).or_insert(0.0) += v;
             }
-            for id in o.killed {
-                if let Some(e) = self.ents.iter_mut().find(|e| e.id == id) {
-                    e.alive = false;
+            killed.extend(o.killed);
+            spawned.append(&mut o.spawned);
+            for n in o.news {
+                self.news.push_back(n);
+                if self.news.len() > NEWS_KEPT {
+                    self.news.pop_front();
                 }
             }
-            self.ents.append(&mut o.spawned);
         }
+        if !killed.is_empty() {
+            for e in self.ents.iter_mut().filter(|e| killed.contains(&e.id)) {
+                e.alive = false;
+            }
+        }
+        self.ents.append(&mut spawned);
+    }
+
+    /// Applies a viewer action right away, so it also works while paused.
+    pub fn place(&mut self, tool: usize, x: f32, y: f32) {
+        let mut scen = self.scenario.take().unwrap();
+        let snap = Snapshot::build(&self.ents, self.w, self.h);
+        let base = self.globals.clone();
+        let env = TickEnv { w: self.w as f32, h: self.h as f32, time: self.time, daylight: self.daylight, snap: &snap, base: &base };
+        let mut cx = Ctx::new(&mut self.rng, env, self.ticks * 4 + 3, VIEWER_SLOT);
+        // Ids must stay unique across several placements within one tick.
+        cx.id_next = self.placed << 12;
+        scen.place(&mut cx, tool, x, y);
+        let out = cx.finish();
+        self.placed += 1;
+        self.merge(vec![out]);
+        self.scenario = Some(scen);
     }
 
     pub fn scenario_name(&self) -> &'static str {
@@ -354,18 +422,19 @@ impl World {
     }
 
     pub fn tick(&mut self, dt: f32) {
-        self.time += dt;
+        self.time += dt as f64;
         self.ticks += 1;
         let epoch = self.ticks * 4;
         let mut scen = self.scenario.take().unwrap();
         self.daylight = day_factor(scen.as_ref(), self.time);
-        let (w, h, time, daylight) = (self.w, self.h, self.time, self.daylight);
+        let (w, h) = (self.w, self.h);
         let base = self.globals.clone();
 
         // Scenario logic runs first, on this thread, against the start-of-tick snapshot.
         let snap = Snapshot::build(&self.ents, w, h);
         let mut scen_rng = Rng::new(self.seed ^ self.ticks.wrapping_mul(0x9E37_79B9));
-        let mut cx = Ctx::new(&mut scen_rng, w as f32, h as f32, time, daylight, &snap, &base, epoch, MAIN_SLOT);
+        let env = TickEnv { w: w as f32, h: h as f32, time: self.time, daylight: self.daylight, snap: &snap, base: &base };
+        let mut cx = Ctx::new(&mut scen_rng, env, epoch, MAIN_SLOT);
         scen.tick(&mut cx, dt);
         let scen_out = cx.finish();
 
@@ -373,13 +442,16 @@ impl World {
         let seed = self.seed;
         let tick = self.ticks;
         let mut outs: Vec<Out> = vec![scen_out];
+        let time_now = self.time;
+        let daylight_now = self.daylight;
         let chunk_outs: Vec<Out> = self
             .ents
             .par_chunks_mut(CHUNK)
             .enumerate()
             .map(|(ci, chunk)| {
                 let mut rng = Rng::new(seed ^ tick.wrapping_mul(0xA24B_AED4) ^ (ci as u64 + 1).wrapping_mul(0x9FB2_1C65));
-                let mut cx = Ctx::new(&mut rng, w as f32, h as f32, time, daylight, &snap, &base, epoch + 1, ci as u64);
+                let env = TickEnv { w: w as f32, h: h as f32, time: time_now, daylight: daylight_now, snap: &snap, base: &base };
+                let mut cx = Ctx::new(&mut rng, env, epoch + 1, ci as u64);
                 for e in chunk.iter_mut().filter(|e| e.alive) {
                     step_entity(e, &mut cx, dt, w, h);
                 }
@@ -391,16 +463,17 @@ impl World {
         self.merge(outs);
 
         // Collision phase uses positions after movement.
-        if self.ents.iter().any(|e| e.physical && e.alive) {
+        if self.ents.iter().any(active_collider) {
             let snap2 = Snapshot::build(&self.ents, w, h);
+            let env = TickEnv { snap: &snap2, ..env_static(self.w, self.h, self.time, self.daylight, &base) };
             let outs: Vec<Out> = self
                 .ents
                 .par_chunks_mut(CHUNK)
                 .enumerate()
                 .map(|(ci, chunk)| {
                     let mut rng = Rng::new(seed ^ tick.wrapping_mul(0xC2B2_AE35) ^ (ci as u64 + 7).wrapping_mul(0x85EB_CA6B));
-                    let mut cx = Ctx::new(&mut rng, w as f32, h as f32, time, daylight, &snap2, &base, epoch + 2, ci as u64);
-                    for e in chunk.iter_mut().filter(|e| e.physical && e.alive) {
+                    let mut cx = Ctx::new(&mut rng, env, epoch + 2, ci as u64);
+                    for e in chunk.iter_mut().filter(|e| active_collider(e)) {
                         let r = e.rect();
                         let others: Vec<Info> = snap2
                             .query(r.0, r.1, r.2, r.3)
@@ -455,7 +528,8 @@ impl World {
         if !dead.is_empty() {
             let snap3 = Snapshot::empty();
             let mut rng = Rng::new(seed ^ tick.wrapping_mul(0x27D4_EB2F));
-            let mut cx = Ctx::new(&mut rng, w as f32, h as f32, time, daylight, &snap3, &base, epoch + 3, MAIN_SLOT);
+            let env = TickEnv { snap: &snap3, ..env_static(self.w, self.h, self.time, self.daylight, &base) };
+            let mut cx = Ctx::new(&mut rng, env, epoch + 3, MAIN_SLOT);
             for e in dead.iter_mut() {
                 if let Some(mut b) = e.behavior.take() {
                     b.on_death(e, &mut cx);
@@ -465,7 +539,19 @@ impl World {
             self.merge(vec![out]);
         }
         self.scenario = Some(scen);
+        // A lightning flash brightens the picture without convincing anything that it is day.
+        self.daylight = self.daylight.max(self.globals.get("flash").copied().unwrap_or(0.0));
     }
+}
+
+fn env_static<'a>(w: i32, h: i32, time: f64, daylight: f32, base: &'a Globals) -> TickEnv<'a> {
+    static EMPTY: std::sync::OnceLock<Snapshot> = std::sync::OnceLock::new();
+    TickEnv { w: w as f32, h: h as f32, time, daylight, snap: EMPTY.get_or_init(Snapshot::empty), base }
+}
+
+/// Only behaviors that react to contact pay for the neighbor search.
+fn active_collider(e: &Entity) -> bool {
+    e.alive && e.physical && e.behavior.as_ref().is_some_and(|b| b.wants_collisions())
 }
 
 /// Advances one entity: behavior, movement, animation and expiry.
@@ -504,12 +590,12 @@ fn leaving(e: &Entity, w: i32, h: i32) -> bool {
         || (y + e.h() <= 0.0 && e.vel.1 < 0.0)
 }
 
-fn day_factor(s: &dyn Scenario, t: f32) -> f32 {
+fn day_factor(s: &dyn Scenario, t: f64) -> f32 {
     match s.day_length() {
         // Smooth day/night wave, starting in the late morning.
         Some(len) => {
-            let phase = (t / len + 0.15) * std::f32::consts::TAU;
-            (0.5 + 0.65 * phase.sin()).clamp(0.0, 1.0)
+            let phase = (t / len as f64 + 0.15).fract() * std::f64::consts::TAU;
+            (0.5 + 0.65 * phase.sin() as f32).clamp(0.0, 1.0)
         }
         None => 1.0,
     }

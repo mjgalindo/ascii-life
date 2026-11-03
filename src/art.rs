@@ -127,7 +127,7 @@ impl Canvas {
         for y in keep_from..self.h {
             for x in 0..self.w {
                 if let Some(c) = self.get(x, y) {
-                    out.set(x, y - cut + 0, scaled(c, 0.85));
+                    out.set(x, y - cut, scaled(c, 0.85));
                 }
             }
         }
@@ -423,7 +423,7 @@ pub fn walker(shirt: Color) -> PixFrame {
 /// Road vehicle facing east (`dir` 0), south (1), west (2) or north (3).
 /// `siren` paints a flashing light on the roof.
 pub fn vehicle(dir: usize, w: i32, h: i32, body: Color, siren: Option<Color>) -> PixFrame {
-    let horizontal = dir % 2 == 0;
+    let horizontal = dir.is_multiple_of(2);
     let (len, wid) = if horizontal { (w, h * 2) } else { (h * 2, w) };
     // Drawn facing "forward" along the length axis, then rotated into place.
     let mut c = Canvas::new(len, wid);
@@ -687,5 +687,45 @@ pub fn tree(season: usize) -> PixFrame {
     }
     c.relight();
     c.outline(OUT);
+    c.frame()
+}
+
+/// Shop front: roof band, wall, door and windows that glow at `night`. Size in pixels.
+pub fn shop(w: i32, h: i32, roof: Color, wall: Color, night: bool) -> PixFrame {
+    let mut c = Canvas::new(w, h);
+    let roof_h = (h * 2 / 5).max(2);
+    for y in 0..roof_h {
+        let inset = (roof_h - 1 - y).min(w / 3);
+        c.rect(inset, y, w - inset * 2, 1, if y % 2 == 0 { roof } else { scaled(roof, 0.82) });
+    }
+    c.rect(1, roof_h, w - 2, h - roof_h, wall);
+    let glass = if night { rgb(255, 225, 110) } else { GLASS };
+    let mut x = 2;
+    while x + 2 < w - 1 {
+        c.rect(x, roof_h + 1, 2, 2.min(h - roof_h - 1), glass);
+        x += 4;
+    }
+    c.rect(w / 2 - 1, h - 3, 2, 3, rgb(70, 46, 30));
+    c.frame()
+}
+
+/// Striped-awning snack stand. Size in pixels.
+pub fn kiosk(w: i32, h: i32) -> PixFrame {
+    let mut c = Canvas::new(w, h);
+    let awning = (h / 2).max(2);
+    for x in 0..w {
+        let col = if (x / 2) % 2 == 0 { rgb(236, 96, 120) } else { rgb(250, 240, 235) };
+        c.rect(x, 0, 1, awning, col);
+    }
+    c.rect(1, awning, w - 2, h - awning, rgb(196, 150, 104));
+    c.rect(2, awning, w - 4, 1, rgb(60, 44, 34));
+    c.frame()
+}
+
+/// Cut tree stump.
+pub fn stump() -> PixFrame {
+    let mut c = Canvas::new(5, 6);
+    c.rect(1, 4, 3, 2, rgb(116, 84, 54));
+    c.rect(1, 4, 3, 1, rgb(190, 156, 110));
     c.frame()
 }

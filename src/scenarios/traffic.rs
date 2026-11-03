@@ -1,3 +1,4 @@
+use super::common::{floating_text, random_name, Weather};
 use crate::engine::sprite::std_palette;
 use crate::engine::*;
 use ratatui::style::Color;
@@ -9,7 +10,7 @@ const H_ROAD_H: i32 = 5;
 const X0: i32 = 6;
 const Y0: i32 = 3;
 
-const CITY_DAY: f32 = 120.0;
+const CITY_DAY: f32 = 300.0;
 const ASPHALT: Color = Color::Rgb(58, 58, 64);
 const SIDEWALK: Color = Color::Rgb(118, 118, 124);
 const GROUND: Color = Color::Rgb(44, 66, 46);
@@ -72,7 +73,7 @@ fn emergency_sprite(dir: usize) -> Sprite {
     let mut digits = [Color::White; 9];
     digits[0] = Color::Rgb(245, 245, 245);
     let base = Frame::parse(&art, Some(&mask), Color::White, &digits);
-    let (sx, sy) = if dir % 2 == 0 { (2, 0) } else { (1, 1) };
+    let (sx, sy) = if dir.is_multiple_of(2) { (2, 0) } else { (1, 1) };
     let frame = |c: Color| {
         let mut f = base.clone();
         f.set(sx, sy, '@', c, None);
@@ -98,7 +99,27 @@ struct Car {
     turn: bool,
     stuck: f32,
     box_wait: f32,
+    waited: f32,
+    /// Seconds a wreck has been blocking the lane.
+    wrecked: Option<f32>,
+    /// A tow truck heads for this wreck, passing everything in its way.
+    tow: Option<Id>,
+    bus: Option<BusRun>,
+    driver: &'static str,
+    trip: f32,
 }
+
+/// Bus timetable state: distance until the next stop and the time left standing at one.
+#[derive(Clone, Copy)]
+struct BusRun {
+    next_stop: f32,
+    dwell: f32,
+    riders: u32,
+}
+
+/// `tags` bits other entities read off a car.
+const TAG_WRECK: u32 = 1;
+const TAG_BUS_STOPPED: u32 = 2;
 
 impl Car {
     fn axis_scale(dir: usize) -> f32 {
@@ -129,13 +150,98 @@ impl Car {
 }
 
 impl Behavior for Car {
+    fn describe(&self, e: &Entity) -> Option<String> {
+        let what = if self.bus.is_some() {
+            "city bus"
+        } else if self.tow.is_some() {
+            "tow truck"
+        } else if self.emergency {
+            "ambulance"
+        } else {
+            ["car", "van", "truck"][self.kind]
+        };
+        let mut out = format!("{} driving a {what}\nspeed {:.0}, stopped {:.0}s", self.driver, e.data, self.waited);
+        if self.wrecked.is_some() {
+            out += "\nCRASHED, waiting for a tow";
+        }
+        if let Some(b) = self.bus {
+            out += &format!("\n{} riders", b.riders);
+        }
+        Some(out)
+    }
+
     fn update(&mut self, e: &mut Entity, cx: &mut Ctx, dt: f32) {
+        self.trip += dt;
+        if let Some(t) = self.wrecked.as_mut() {
+            *t += dt;
+            e.vel = (0.0, 0.0);
+            e.data = 0.0;
+            self.v = 0.0;
+            if cx.rng.chance(0.12) {
+                let dx = cx.rng.range(0.0, e.w());
+                cx.spawn(
+                    Entity::new("smoke", Sprite::mono("o", Color::Rgb(150, 150, 150)))
+                        .at(e.pos.0 + dx, e.pos.1 - 1.0)
+                        .vel(0.4, -1.6)
+                        .z(3)
+                        .lifetime(2.0),
+                );
+            }
+            // Clear the lane eventually even when no truck can reach it.
+            if *t > 70.0 {
+                cx.add("crashes_cleared", 1.0);
+                e.kill();
+            }
+            return;
+        }
+        if let Some(target) = self.tow {
+            let Some(wreck) = cx.snap.get(target) else {
+                self.tow = None;
+                self.emergency = false;
+                e.vel = (DX[self.dir] * self.vmax, DY[self.dir] * self.vmax);
+                return;
+            };
+            let (dx, dy) = (wreck.pos.0 - e.pos.0, wreck.pos.1 - e.pos.1);
+            if dx.abs() + dy.abs() < 12.0 {
+                cx.kill(target);
+                cx.add("crashes_cleared", 1.0);
+                cx.spawn(floating_text("towed!", Color::Rgb(255, 230, 140), wreck.pos.0, wreck.pos.1 - 1.0));
+                cx.news("Tow truck clears the wreck. Traffic is moving again.", Some(wreck.pos));
+            }
+            self.v = self.vmax;
+            e.vel = (DX[self.dir] * self.v, DY[self.dir] * self.v);
+            e.data = self.v;
+            e.state = 11 + self.dir as i32;
+            return;
+        }
+
         let mut boxed = false;
+        // Buses stand at their stops with doors open; riders nearby climb aboard.
+        if let Some(b) = self.bus.as_mut() {
+            if b.dwell > 0.0 {
+                b.dwell -= dt;
+                e.vel = (0.0, 0.0);
+                self.v = 0.0;
+                e.data = 0.0;
+                e.tags = TAG_BUS_STOPPED;
+                return;
+            }
+            e.tags = 0;
+            b.next_stop -= self.v * dt;
+            if b.next_stop <= 0.0 {
+                b.next_stop = cx.rng.range(50.0, 110.0);
+                b.dwell = 4.0;
+                b.riders += cx.rng.int(0, 4) as u32;
+                cx.spawn(floating_text("ding!", Color::Rgb(255, 240, 150), e.pos.0, e.pos.1 - 1.0));
+            }
+        }
+        let wet = cx.global("rain");
+        let grip = if wet >= 2.0 { 0.72 } else if wet >= 1.0 { 0.85 } else { 1.0 };
         let d = self.dir;
         let scale = Car::axis_scale(d);
         let (a_acc, a_brake) = (6.0 * scale, 9.0 * scale);
         let me = e.rect();
-        let my_len = if d % 2 == 0 { me.2 } else { me.3 };
+        let my_len = if d.is_multiple_of(2) { me.2 } else { me.3 };
         let stop_dist = self.v * self.v / (2.0 * a_brake);
         let look = ((stop_dist + 8.0) as i32).max(24);
         let probe = match d {
@@ -178,7 +284,7 @@ impl Behavior for Car {
             let (green, yellow) = if d % 2 == 1 { (0, 1) } else { (3, 4) };
             let can_run_yellow = phase == yellow && (g as f32) < stop_dist;
             let must_stop = phase != green && !can_run_yellow && !self.emergency;
-            let inter_len = if d % 2 == 0 { s.rect.2 } else { s.rect.3 };
+            let inter_len = if d.is_multiple_of(2) { s.rect.2 } else { s.rect.3 };
             let box_blocked =
                 stationary_beyond.iter().any(|&sg| sg >= g && sg < g + inter_len + my_len + 2);
             let box_blocked = box_blocked && self.box_wait < 8.0;
@@ -191,7 +297,7 @@ impl Behavior for Car {
         let target = if allowed <= 0.0 {
             0.0
         } else {
-            self.vmax.min((2.0 * a_brake * allowed).sqrt())
+            (self.vmax * grip).min((2.0 * a_brake * allowed).sqrt())
         };
         self.box_wait = if boxed && self.v < 0.1 { self.box_wait + dt } else if boxed { self.box_wait } else { 0.0 };
         let dv = (target - self.v).clamp(-a_brake * dt * 1.5, a_acc * dt);
@@ -204,6 +310,25 @@ impl Behavior for Car {
         let inside = cx.snap.query(me.0, me.1, me.2, me.3);
         let in_box = inside.iter().any(|o| o.kind == "signal");
         self.stuck = if in_box && self.v < 0.1 { self.stuck + dt } else { 0.0 };
+        self.waited = if self.v < 0.1 { self.waited + dt } else { 0.0 };
+        if self.waited > 12.0 && cx.rng.chance(0.0006) {
+            let rant = *cx.rng.pick(&["HONK!", "BEEP!", "come ON", "MOVE!", "honk"]);
+            cx.spawn(floating_text(rant, Color::Rgb(255, 210, 160), e.pos.0, e.pos.1 - 1.0));
+            cx.add("honks", 1.0);
+        }
+        // Junctions are where it goes wrong, mostly in the wet.
+        let danger = if wet >= 1.0 { 0.00003 } else { 0.000005 };
+        if in_box && self.v > 2.0 && !self.emergency && self.bus.is_none() && cx.rng.chance(danger) {
+            self.wrecked = Some(0.0);
+            e.tags = TAG_WRECK;
+            e.vel = (0.0, 0.0);
+            e.data = 0.0;
+            cx.add("crashes", 1.0);
+            let line = if wet >= 1.0 { "skidded on the wet road and crashed" } else { "crashed at a junction" };
+            cx.news(format!("{} {line}!", self.driver), Some(e.pos));
+            cx.spawn(floating_text("CRASH!", Color::Rgb(255, 120, 90), e.pos.0, e.pos.1 - 1.0));
+            return;
+        }
         if let Some(s) = inside.iter().find(|o| o.kind == "signal") {
             if self.sig != Some(s.id) {
                 self.sig = Some(s.id);
@@ -239,6 +364,12 @@ impl Behavior for Car {
 
     fn on_death(&mut self, _e: &Entity, cx: &mut Ctx) {
         cx.add("trips", 1.0);
+        if self.wrecked.is_none() {
+            cx.add("trip_time", self.trip);
+        }
+        if let Some(b) = self.bus {
+            cx.add("riders", b.riders as f32);
+        }
     }
 }
 
@@ -333,9 +464,18 @@ impl Behavior for Ped {
             }
             let inside = crate::engine::world::overlaps(me, s.rect);
             // Crossing a road is safe while that road's own traffic is stopped.
-            let safe = if d % 2 == 0 { s.state == 3 } else { s.state == 0 };
+            let safe = if d.is_multiple_of(2) { s.state == 3 } else { s.state == 0 };
             if !inside && !safe {
                 wait = true;
+            }
+        }
+        if e.age > 3.0 && cx.rng.chance(0.2) {
+            let bus = cx.snap.query(me.0 - 3, me.1 - 2, 7, 5).iter().any(|o| o.tags == TAG_BUS_STOPPED && o.kind == "car");
+            if bus {
+                cx.spawn(floating_text("hop on", Color::Rgb(200, 240, 200), e.pos.0, e.pos.1 - 1.0));
+                cx.add("boarded", 1.0);
+                e.kill();
+                return;
             }
         }
         let scale = if d % 2 == 1 { 0.5 } else { 1.0 };
@@ -422,7 +562,6 @@ fn building(w: usize, h: usize, rng: &mut Rng) -> Sprite {
 
 fn tree(rng: &mut Rng) -> Sprite {
     let c = if rng.chance(0.5) { 'G' } else { 'g' };
-    let _ = std_palette(c);
     Sprite::mono(if rng.chance(0.5) { "&" } else { "Y" }, std_palette(c).unwrap())
 }
 
@@ -432,11 +571,23 @@ pub struct Traffic {
     vroads: Vec<i32>,
     hroads: Vec<i32>,
     spawn_acc: f32,
+    weather: Weather,
+    /// Wrecks that already have a tow truck on the way.
+    towing: Vec<Id>,
+    rush: bool,
 }
 
 impl Default for Traffic {
     fn default() -> Self {
-        Traffic { city: false, vroads: vec![], hroads: vec![], spawn_acc: 0.0 }
+        Traffic {
+            city: false,
+            vroads: vec![],
+            hroads: vec![],
+            spawn_acc: 0.0,
+            weather: Weather::default(),
+            towing: vec![],
+            rush: false,
+        }
     }
 }
 
@@ -473,7 +624,7 @@ impl Traffic {
 
     fn lane_capacity(&self, w: i32, h: i32) -> usize {
         let lane_len = 2 * w * self.hroads.len() as i32 + 2 * h * self.vroads.len() as i32;
-        (lane_len / 18) as usize
+        (lane_len / 34) as usize
     }
 
     fn initial_cap(&self, w: i32, h: i32) -> i32 {
@@ -523,13 +674,14 @@ impl Traffic {
 
     fn spawn_car(&self, cx: &mut Ctx, dir: usize, x: f32, y: f32, moving: bool) {
         let emergency = moving && cx.rng.chance(0.012);
+        let bus = !emergency && cx.rng.chance(0.04);
         let kind = match cx.rng.f() {
             f if f < 0.78 => 0,
             f if f < 0.93 => 1,
             _ => 2,
         };
-        let color = std_palette(*cx.rng.pick(BODY_COLORS)).unwrap();
-        let kind = if emergency { 1 } else { kind };
+        let color = if bus { Color::Rgb(250, 200, 50) } else { std_palette(*cx.rng.pick(BODY_COLORS)).unwrap() };
+        let kind = if emergency { 1 } else if bus { 2 } else { kind };
         let sprite = if emergency { emergency_sprite(dir) } else { car_sprite(dir, kind, color) };
         let (w, h) = (sprite.w() as f32, sprite.h() as f32);
         let (x, y) = match dir {
@@ -546,7 +698,25 @@ impl Traffic {
         if emergency {
             vmax *= 1.4;
         }
-        let car = Car { dir, kind, color, emergency, v: if moving { vmax } else { 0.0 }, vmax, sig: None, turn: false, stuck: 0.0, box_wait: 0.0 };
+        let run = bus.then(|| BusRun { next_stop: cx.rng.range(20.0, 90.0), dwell: 0.0, riders: cx.rng.int(0, 10) as u32 });
+        let car = Car {
+            dir,
+            kind,
+            color,
+            emergency,
+            v: if moving { vmax } else { 0.0 },
+            vmax,
+            sig: None,
+            turn: false,
+            stuck: 0.0,
+            box_wait: 0.0,
+            waited: 0.0,
+            wrecked: None,
+            tow: None,
+            bus: run,
+            driver: random_name(cx.rng),
+            trip: 0.0,
+        };
         let mut e = Entity::new("car", sprite).at(x, y).z(10).die_offscreen().with(car);
         if emergency {
             e.anim_fps = 4.0;
@@ -556,6 +726,44 @@ impl Traffic {
 }
 
 impl Traffic {
+    /// Sends a tow truck down the wreck's lane from the map edge.
+    fn send_tow(&self, cx: &mut Ctx, wreck: &Info) {
+        let d = (wreck.state - 1).rem_euclid(10) as usize;
+        let (x, y) = match d {
+            0 => (-6.0, wreck.pos.1),
+            2 => (cx.w, wreck.pos.1),
+            1 => (wreck.pos.0, -4.0),
+            _ => (wreck.pos.0, cx.h),
+        };
+        let vmax = 18.0 * Car::axis_scale(d);
+        let car = Car {
+            dir: d,
+            kind: 1,
+            color: Color::Rgb(245, 245, 245),
+            emergency: true,
+            v: vmax,
+            vmax,
+            sig: None,
+            turn: false,
+            stuck: 0.0,
+            box_wait: 0.0,
+            waited: 0.0,
+            wrecked: None,
+            tow: Some(wreck.id),
+            bus: None,
+            driver: random_name(cx.rng),
+            trip: 0.0,
+        };
+        cx.spawn(Entity::new("car", emergency_sprite(d)).at(x, y).z(9).fps(4.0).die_offscreen().with(car));
+    }
+
+    /// Commuter demand over the day: two rush hours, quiet nights.
+    fn demand(time: f64) -> f32 {
+        let c = (time / CITY_DAY as f64 + 0.4).fract() as f32;
+        let bump = |center: f32, width: f32| (-((c - center) / width).powi(2)).exp();
+        0.25 + 1.3 * bump(0.33, 0.06) + 1.3 * bump(0.72, 0.06) + 0.5 * bump(0.5, 0.2)
+    }
+
     /// Pedestrians walk the full length of a sidewalk, crossing at signals.
     fn spawn_ped(&self, cx: &mut Ctx) {
         let (w, h) = (cx.w as i32, cx.h as i32);
@@ -595,6 +803,27 @@ impl Scenario for Traffic {
         if self.city { "city" } else { "traffic" }
     }
 
+    fn tools(&self) -> &'static [&'static str] {
+        &["wave of cars", "thunderstorm"]
+    }
+
+    fn place(&mut self, cx: &mut Ctx, tool: usize, _x: f32, _y: f32) {
+        if tool == 0 {
+            let (w, h) = (cx.w as i32, cx.h as i32);
+            for (dir, x, y) in self.lanes(w, h) {
+                let (sx, sy) = match dir {
+                    0 => (x + 4.0, y),
+                    1 => (x, y + 2.0),
+                    _ => (x, y),
+                };
+                self.spawn_car(cx, dir, sx, sy, true);
+            }
+            cx.news("A wave of cars pours into town.", None);
+        } else {
+            self.weather.force_storm(cx);
+        }
+    }
+
     fn preferred_size(&self) -> Option<(i32, i32)> {
         Some(if self.city { (520, 160) } else { (400, 130) })
     }
@@ -604,18 +833,25 @@ impl Scenario for Traffic {
     }
 
     fn day_length(&self) -> Option<f32> {
-        Some(120.0)
+        Some(CITY_DAY)
     }
 
     fn hud(&self, g: &Globals, daylight: f32) -> String {
         let t = |k| g.get(k).copied().unwrap_or(0.0) as i32;
+        let trips = g.get("trips").copied().unwrap_or(0.0).max(1.0);
+        let avg = g.get("trip_time").copied().unwrap_or(0.0) / trips;
         format!(
-            "cars {} (waiting {}) walkers {} animals {} trips {} | {}",
+            "cars {} (waiting {}) trips {} avg {:.0}s | bus riders {} | crashes {} honks {} | walkers {} animals {} | {}{}",
             t("cars"),
             t("waiting"),
+            t("trips"),
+            avg,
+            t("riders") + t("boarded"),
+            t("crashes"),
+            t("honks"),
             t("walkers"),
             t("animals"),
-            t("trips"),
+            if t("rush") > 0 { "RUSH HOUR " } else { "" },
             if daylight > 0.45 { "day" } else { "night" }
         )
     }
@@ -726,6 +962,25 @@ impl Scenario for Traffic {
 
         cx.set("walkers", cx.snap.count("ped") as f32);
 
+        self.weather.tick(cx, dt, false);
+        self.towing.retain(|id| cx.snap.get(*id).is_some());
+        let wrecks: Vec<Info> = cx.snap.of_kind("car").filter(|c| c.tags == TAG_WRECK).copied().collect();
+        for wreck in wrecks {
+            if !self.towing.contains(&wreck.id) {
+                self.towing.push(wreck.id);
+                self.send_tow(cx, &wreck);
+            }
+        }
+        let demand = Traffic::demand(cx.time);
+        let rush = demand > 1.0;
+        if rush != self.rush {
+            self.rush = rush;
+            if rush {
+                cx.news("Rush hour! Everybody is on the road at once.", None);
+            }
+        }
+        cx.set("rush", rush as i32 as f32);
+
         self.spawn_acc += dt;
         if self.spawn_acc < 0.25 {
             return;
@@ -734,12 +989,12 @@ impl Scenario for Traffic {
         let (w, h) = (cx.w as i32, cx.h as i32);
         // Cap the fleet by total lane length so queues cannot spill back into gridlock.
         let capacity = self.lane_capacity(w, h);
-        let room = cx.snap.count("car") < capacity;
+        let room = (cx.snap.count("car") as f32) < capacity as f32 * (0.4 + demand * 0.45).min(1.0);
         if cx.snap.count("ped") < (w / 5) as usize && cx.rng.chance(0.35) {
             self.spawn_ped(cx);
         }
         for (dir, x, y) in self.lanes(w, h) {
-            if room && cx.rng.chance(0.1) {
+            if room && cx.rng.chance(0.1 * demand) {
                 let (sx, sy) = match dir {
                     0 => (x + 4.0, y),
                     1 => (x, y + 2.0),

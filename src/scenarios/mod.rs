@@ -1,4 +1,5 @@
 mod aquarium;
+mod common;
 mod gallery;
 mod traffic;
 mod village;

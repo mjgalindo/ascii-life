@@ -213,7 +213,7 @@ fn flip_glyph(c: char) -> char {
 pub struct Sprite {
     pub frames: Arc<Vec<Frame>>,
     /// Hand-drawn pixel art; when absent the ASCII frames are rasterized.
-    pub pixels: Option<Arc<Vec<PixFrame>>>,
+    pub pixels: Option<Arc<Vec<Arc<PixFrame>>>>,
     /// Text drawn as real glyphs on top of the pixel canvas so it stays legible.
     pub overlay: bool,
 }
@@ -261,21 +261,21 @@ impl Sprite {
 
     pub fn mirrored(&self) -> Sprite {
         let mut s = Sprite::new(self.frames.iter().map(|f| f.mirrored()).collect());
-        s.pixels = self.pixels.as_ref().map(|p| Arc::new(p.iter().map(|f| f.mirrored()).collect()));
+        s.pixels = self.pixels.as_ref().map(|p| Arc::new(p.iter().map(|f| Arc::new(f.mirrored())).collect()));
         s.overlay = self.overlay;
         s
     }
 
     /// Attaches hand-drawn pixel frames (one per ASCII frame) for the pixel renderer.
     pub fn with_pixels(mut self, frames: Vec<PixFrame>) -> Sprite {
-        self.pixels = Some(Arc::new(frames));
+        self.pixels = Some(Arc::new(frames.into_iter().map(Arc::new).collect()));
         self
     }
 
     /// Pixel frame for animation frame `i`, falling back to rasterized ASCII.
     pub fn pixel_frame(&self, i: usize) -> Arc<PixFrame> {
         match &self.pixels {
-            Some(p) if !p.is_empty() => Arc::new(p[i.min(p.len() - 1)].clone()),
+            Some(p) if !p.is_empty() => p[i.min(p.len() - 1)].clone(),
             _ => self.frames[i.min(self.frames.len() - 1)].to_pix(),
         }
     }

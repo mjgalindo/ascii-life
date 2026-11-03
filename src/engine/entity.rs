@@ -7,7 +7,7 @@ pub type Id = u64;
 /// (override with `.scenery()` or by assigning the field).
 const SCENERY_KINDS: &[&str] = &[
     "road", "ground", "building", "tree", "pen", "tank", "lamp", "well", "bench", "seaweed", "emote",
-    "smoke", "rain", "snow", "trail", "house", "field", "chimney", "bubble", "kiosk", "label",
+    "smoke", "rain", "snow", "trail", "house", "field", "chimney", "bubble", "kiosk", "label", "grave", "spark", "terrain", "flame",
 ];
 
 /// Per-entity logic. Every hook is optional; entities without a behavior simply drift with `vel`.
@@ -15,6 +15,14 @@ pub trait Behavior: Send {
     fn update(&mut self, _e: &mut Entity, _cx: &mut Ctx, _dt: f32) {}
     fn on_collide(&mut self, _e: &mut Entity, _other: &Info, _cx: &mut Ctx) {}
     fn on_death(&mut self, _e: &Entity, _cx: &mut Ctx) {}
+    /// Whether `on_collide` does anything; passive entities skip the neighbor search.
+    fn wants_collisions(&self) -> bool {
+        false
+    }
+    /// Short biography shown by the inspector.
+    fn describe(&self, _e: &Entity) -> Option<String> {
+        None
+    }
 }
 
 /// Attaches an entity to a parent so compound objects (shark + teeth) move and die together.

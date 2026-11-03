@@ -66,7 +66,15 @@ fn to_rgb(c: Color) -> Rgb {
 }
 
 fn shade(c: Rgb, daylight: f32) -> Rgb {
-    let k = (1.0 - daylight) * 0.7;
+    shade_by(c, (1.0 - daylight) * 0.55)
+}
+
+/// Glyphs darken less than what is behind them so text stays readable at night.
+fn shade_ink(c: Rgb, daylight: f32) -> Rgb {
+    shade_by(c, (1.0 - daylight) * 0.2)
+}
+
+fn shade_by(c: Rgb, k: f32) -> Rgb {
     if k <= 0.001 {
         return c;
     }
@@ -169,7 +177,7 @@ fn draw_ascii(
             };
             let cell = &mut buf[(area.x + sx as u16, area.y + sy as u16)];
             cell.set_char(glyph);
-            cell.set_fg(color(shade(fg, world.daylight)));
+            cell.set_fg(color(shade_ink(fg, world.daylight)));
             cell.set_bg(color(shade(cbg, world.daylight)));
             if sel {
                 cell.set_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
@@ -186,13 +194,13 @@ fn downsample_block(c: &Cells, cw: i32, x0: i32, y0: i32, z: i32) -> (char, Rgb,
     for y in y0..y0 + z {
         for x in x0..x0 + z {
             let i = (y * cw + x) as usize;
-            for k in 0..3 {
-                bg[k] += c.bg[i][k] as u32;
+            for (sum, v) in bg.iter_mut().zip(c.bg[i]) {
+                *sum += v as u32;
             }
             if c.ch[i] != ' ' {
                 ink += 1;
-                for k in 0..3 {
-                    fg[k] += c.fg[i][k] as u32;
+                for (sum, v) in fg.iter_mut().zip(c.fg[i]) {
+                    *sum += v as u32;
                 }
                 sel |= c.sel[i];
             }
@@ -316,7 +324,7 @@ fn draw_pixels(
                         ((top[2] as u16 + bottom[2] as u16) / 2) as u8,
                     ];
                     cell.set_char(g);
-                    cell.set_fg(color(shade(to_rgb(f.fg[(fy as usize) * f.w + fx as usize]), world.daylight)));
+                    cell.set_fg(color(shade_ink(to_rgb(f.fg[(fy as usize) * f.w + fx as usize]), world.daylight)));
                     cell.set_bg(color(mid));
                 }
             }
