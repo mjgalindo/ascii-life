@@ -1,4 +1,4 @@
-use super::common::{floating_text, random_name, Spark};
+use super::common::{random_name, Spark};
 use crate::engine::sprite::{std_palette, PixFrame};
 use crate::engine::*;
 use ratatui::style::Color;
@@ -97,6 +97,11 @@ const FISH_PALETTE: &[(char, Color)] = &[
     ('s', Color::Rgb(120, 135, 150)),
     ('T', Color::Rgb(205, 170, 95)),
     ('t', Color::Rgb(110, 84, 50)),
+    ('G', Color::Rgb(84, 92, 112)),
+    ('D', Color::Rgb(150, 34, 40)),
+    ('E', Color::Rgb(226, 72, 60)),
+    ('P', Color::Rgb(236, 130, 220)),
+    ('p', Color::Rgb(250, 190, 240)),
 ];
 
 /// Second swim pose: the two tail columns kick up a pixel.
@@ -132,61 +137,126 @@ struct Fish {
     steer: (f32, f32),
     /// Direct push away from overlapping neighbors, in cells per second.
     shove: (f32, f32),
-    fleeing: bool,
+    /// Sprint reserve: a full burst outruns little, and a tired fish gets caught.
+    stamina: f32,
+    /// Seconds a schoolmate's panic keeps this fish alert after it has seen nothing itself.
+    alarm: f32,
     name: &'static str,
-    floor: Arc<Vec<f32>>,
+    habitat: Arc<Habitat>,
 }
 
+/// Fixed features of the sea that fish navigate by.
+#[derive(Default)]
+struct Habitat {
+    floor: Vec<f32>,
+    /// Middle of each kelp stand, where small fish can vanish from a shark's sight.
+    cover: Vec<(f32, f32)>,
+}
+
+const CALM: i32 = 0;
+const FLEEING: i32 = 1;
+const HIDING: i32 = 2;
+/// How far a fish notices a shark, in cells across (height counts double).
+const SIGHT: f32 = 34.0;
+/// Panic passes through this many fish from one that saw a shark. The limit lets it die
+/// out once the shark is gone; otherwise fish keep alarming each other forever.
+const PANIC_HOPS: f32 = 2.0;
+
 impl Fish {
-    fn decide(&mut self, e: &mut Entity, cx: &mut Ctx) {
+    fn decide(&mut self, e: &mut Entity, cx: &mut Ctx, dt_since: f32) {
         let (x, y) = (e.pos.0, e.pos.1);
-        let around = cx.snap.query(x as i32 - 18, y as i32 - 8, 36, 16);
-        let (mut sep, mut ali, mut coh, mut mates) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32), (0.0f32, 0.0f32), 0.0f32);
-        let mut flee: Option<(f32, f32)> = None;
-        let mut snack: Option<(Id, (f32, f32))> = None;
         let (own_w, own_h) = (e.w(), e.h());
+        let (mut sep, mut ali, mut coh, mut mates) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32), (0.0f32, 0.0f32), 0.0f32);
+        let mut snack: Option<(Id, (f32, f32))> = None;
         let mut shove = (0.0f32, 0.0f32);
-        for o in &around {
+        let mut panic_dir = (0.0f32, 0.0f32);
+        let mut nearest_hop = f32::MAX;
+        let hungry = self.energy < 1.4;
+        let id = e.id;
+        let tags = e.tags;
+        cx.snap.each(x as i32 - 18, y as i32 - 8, 36, 16, |o| {
             let (dx, dy) = (o.pos.0 - x, (o.pos.1 - y) * 2.0);
-            // Personal space scales with both sprites, so every fish stays readable.
-            if o.kind == "fish" && o.id != e.id {
-                let gap_x = (own_w + o.rect.2 as f32) / 2.0 + 1.5;
-                let gap_y = own_h.max(1.0) + 1.0;
-                let cdx = o.pos.0 + o.rect.2 as f32 / 2.0 - (x + own_w / 2.0);
-                let cdy = o.pos.1 - y;
-                let (ox, oy) = (1.0 - cdx.abs() / gap_x, 1.0 - cdy.abs() / gap_y);
-                if ox > 0.0 && oy > 0.0 {
-                    let side = |d: f32, id: bool| if d > 0.0 || (d == 0.0 && id) { -1.0 } else { 1.0 };
-                    let lower = e.id < o.id;
-                    // Slide apart along the axis needing the shorter move, usually vertical.
-                    if oy * gap_y <= ox * gap_x {
-                        shove.1 += side(cdy, lower) * oy * gap_y;
-                    } else {
-                        shove.0 += side(cdx, lower) * ox * gap_x;
-                    }
-                }
-            }
             match o.kind {
-                "shark" => flee = Some((-dx, -dy)),
-                "plankton" if snack.is_none() && self.energy < 1.4 => snack = Some((o.id, o.pos)),
-                "fish" if o.tags == e.tags && o.id != e.id && mates < 10.0 => {
-                    mates += 1.0;
-                    ali = (ali.0 + o.vel.0, ali.1 + o.vel.1);
-                    coh = (coh.0 + dx, coh.1 + dy);
-                    let d2 = (dx * dx + dy * dy).max(0.5);
-                    if d2 < 100.0 {
-                        sep = (sep.0 - dx / d2, sep.1 - dy / d2);
+                "plankton" if snack.is_none() && hungry => snack = Some((o.id, o.pos)),
+                "fish" if o.id != id => {
+                    // Personal space scales with both sprites, so every fish stays readable.
+                    let gap_x = (own_w + o.rect.2 as f32) / 2.0 + 1.5;
+                    let gap_y = own_h.max(1.0) + 1.0;
+                    let cdx = o.pos.0 + o.rect.2 as f32 / 2.0 - (x + own_w / 2.0);
+                    let cdy = o.pos.1 - y;
+                    let (ox, oy) = (1.0 - cdx.abs() / gap_x, 1.0 - cdy.abs() / gap_y);
+                    if ox > 0.0 && oy > 0.0 {
+                        let side = |d: f32| if d > 0.0 || (d == 0.0 && id < o.id) { -1.0 } else { 1.0 };
+                        // Slide apart along the axis needing the shorter move, usually vertical.
+                        if oy * gap_y <= ox * gap_x {
+                            shove.1 += side(cdy) * oy * gap_y;
+                        } else {
+                            shove.0 += side(cdx) * ox * gap_x;
+                        }
+                    }
+                    // Panic spreads through whatever is nearby, faster than any shark swims.
+                    if o.state == FLEEING && o.data < PANIC_HOPS {
+                        panic_dir = (panic_dir.0 + o.vel.0, panic_dir.1 + o.vel.1 * 2.0);
+                        nearest_hop = nearest_hop.min(o.data);
+                    }
+                    if o.tags == tags && mates < 10.0 {
+                        mates += 1.0;
+                        ali = (ali.0 + o.vel.0, ali.1 + o.vel.1);
+                        coh = (coh.0 + dx, coh.1 + dy);
+                        let d2 = (dx * dx + dy * dy).max(0.5);
+                        if d2 < 100.0 {
+                            sep = (sep.0 - dx / d2, sep.1 - dy / d2);
+                        }
                     }
                 }
                 _ => {}
             }
+        });
+
+        // Threat: flee from where each shark is, weighted by closeness, and dodge sideways
+        // out of the path of one that is swimming straight at this fish.
+        let mut threat = (0.0f32, 0.0f32);
+        let (cxf, cyf) = (x + own_w / 2.0, y + own_h / 2.0);
+        {
+            cx.snap.of_kind("shark").for_each(|o| {
+                let (sx, sy) = (o.rect.0 as f32 + o.rect.2 as f32 / 2.0, o.rect.1 as f32 + o.rect.3 as f32 / 2.0);
+                let (ax, ay) = (cxf - sx, (cyf - sy) * 2.0);
+                let d = (ax * ax + ay * ay).sqrt().max(0.5);
+                if d > SIGHT {
+                    return;
+                }
+                let w = 1.0 - d / SIGHT;
+                threat.0 += ax / d * w;
+                threat.1 += ay / d * w;
+                let (vx, vy) = (o.vel.0, o.vel.1 * 2.0);
+                let v = (vx * vx + vy * vy).sqrt().max(0.1);
+                if (vx * ax + vy * ay) / (v * d) > 0.7 {
+                    // Pick the perpendicular on the side the fish already is.
+                    let (px, py) = (-vy / v, vx / v);
+                    let s = if px * ax + py * ay >= 0.0 { 1.0 } else { -1.0 };
+                    threat.0 += px * s * w * 1.5;
+                    threat.1 += py * s * w * 1.5;
+                }
+            });
         }
+        let sees_shark = threat != (0.0, 0.0);
+        if sees_shark {
+            self.alarm = 2.0;
+            e.data = 0.0;
+        } else if panic_dir != (0.0, 0.0) {
+            self.alarm = 1.2;
+            e.data = nearest_hop + 1.0;
+        } else {
+            self.alarm = (self.alarm - dt_since).max(0.0);
+        }
+        let scared = self.alarm > 0.0;
+
         let mut s = (e.vel.0, e.vel.1 * 2.0);
         if mates > 0.0 {
             s.0 += ali.0 / mates * 0.5 + coh.0 / mates * 0.05 + sep.0 * 14.0;
             s.1 += ali.1 / mates * 0.5 + coh.1 / mates * 0.05 + sep.1 * 14.0;
         }
-        if let Some((id, p)) = snack {
+        if let (Some((id, p)), false) = (snack, scared) {
             let (dx, dy) = (p.0 - x, (p.1 - y) * 2.0);
             // Hungrier fish break formation to feed.
             let pull = if self.energy < 0.6 { 1.2 } else { 0.4 };
@@ -197,34 +267,66 @@ impl Fish {
                 self.energy += 0.22;
             }
         }
+
+        let mut hiding = false;
+        if scared {
+            s = if sees_shark {
+                (threat.0 * 40.0, threat.1 * 40.0)
+            } else {
+                (s.0 + panic_dir.0, s.1 + panic_dir.1)
+            };
+            // Small fish make for the nearest kelp and sit tight among the fronds.
+            if own_w <= 8.0 && own_h <= 2.0 {
+                let near = self.habitat.cover.iter().copied().min_by(|a, b| {
+                    let d = |q: &(f32, f32)| (q.0 - x).abs() + (q.1 - y).abs() * 2.0;
+                    d(a).total_cmp(&d(b))
+                });
+                if let Some(k) = near {
+                    let (dx, dy) = (k.0 - x, (k.1 - y) * 2.0);
+                    let dist = dx.abs() + dy.abs();
+                    if dist < 3.0 {
+                        hiding = true;
+                    } else if dist < 40.0 {
+                        s.0 += dx * 1.5;
+                        s.1 += dy * 1.5;
+                    }
+                }
+            }
+        }
+
         // Walls and water limits turn the school around rather than letting it leave.
-        let floor = self.floor.get(x.max(0.0) as usize).copied().unwrap_or(cx.h);
+        let floor = self.habitat.floor.get(x.max(0.0) as usize).copied().unwrap_or(cx.h);
+        let wall = if scared { 30.0 } else { 8.0 };
         if x < 6.0 {
-            s.0 += 8.0;
+            s.0 += wall;
         } else if x > cx.w - 12.0 {
-            s.0 -= 8.0;
+            s.0 -= wall;
         }
         if y < WATER_Y + 4.0 {
-            s.1 += 6.0;
+            s.1 += wall;
         } else if y > floor - 5.0 {
-            s.1 -= 8.0;
+            s.1 -= wall;
         }
         self.shove = shove;
-        self.fleeing = flee.is_some();
-        if let Some(f) = flee {
-            s = (s.0 + f.0 * 2.0, s.1 + f.1 * 2.0);
-        }
         s.0 += cx.rng.range(-1.0, 1.0);
         s.1 += cx.rng.range(-0.6, 0.6);
         let len = (s.0 * s.0 + s.1 * s.1).sqrt().max(0.01);
-        let v = self.speed * if self.fleeing { 1.3 } else { 1.0 };
+        let burst = if scared && self.stamina > 0.0 { 1.7 } else { 1.0 };
+        let v = self.speed * if hiding { 0.15 } else { burst };
         self.steer = (s.0 / len * v, s.1 / len * v * 0.5);
+        e.state = if hiding {
+            HIDING
+        } else if scared {
+            FLEEING
+        } else {
+            CALM
+        };
 
-        if self.energy > 1.5 && cx.global("fish") < cx.global("fish_cap") {
+        if !scared && self.energy > 1.5 && cx.global("fish") < cx.global("fish_cap") {
             self.energy -= 0.7;
-            let (sprites, speed, floor, tags) = (self.sprites.clone(), self.speed, self.floor.clone(), e.tags);
+            let (sprites, speed, habitat, tags) = (self.sprites.clone(), self.speed, self.habitat.clone(), e.tags);
             let name = random_name(cx.rng);
-            spawn_school_member(cx, sprites, speed, floor, tags, x, y, name);
+            spawn_school_member(cx, sprites, speed, habitat, tags, x, y, name);
         }
     }
 }
@@ -244,16 +346,19 @@ impl Behavior for Fish {
             e.kill();
             return;
         }
+        self.stamina = if e.state == FLEEING { (self.stamina - dt / 4.0).max(0.0) } else { (self.stamina + dt / 12.0).min(1.0) };
         self.think -= dt;
         if self.think <= 0.0 {
-            self.think = cx.rng.range(0.15, 0.4);
-            self.decide(e, cx);
+            // A frightened fish reacts several times faster than a grazing one.
+            let wait = if e.state == CALM { cx.rng.range(0.15, 0.4) } else { cx.rng.range(0.06, 0.12) };
+            self.think = wait;
+            self.decide(e, cx, wait);
         }
-        let k = (dt * 3.0).min(1.0);
+        let k = (dt * if e.state == CALM { 3.0 } else { 8.0 }).min(1.0);
         e.vel.0 += (self.steer.0 - e.vel.0) * k;
         e.vel.1 += (self.steer.1 - e.vel.1) * k;
         e.pos.0 = (e.pos.0 + self.shove.0 * dt * 3.0).clamp(0.0, cx.w - e.w());
-        let bed = self.floor.get(e.cx().max(0.0) as usize).copied().unwrap_or(cx.h);
+        let bed = self.habitat.floor.get(e.cx().max(0.0) as usize).copied().unwrap_or(cx.h);
         e.pos.1 = (e.pos.1 + self.shove.1 * dt * 3.0).clamp(WATER_Y + 2.0, (bed - e.h()).max(WATER_Y + 2.0));
         let right = e.vel.0 > 0.0;
         if right != self.right {
@@ -267,14 +372,21 @@ impl Behavior for Fish {
     }
 
     fn describe(&self, e: &Entity) -> Option<String> {
-        let mood = if self.fleeing { "fleeing!" } else if self.energy > 1.0 { "well fed" } else if self.energy < 0.3 { "starving" } else { "grazing" };
+        let mood = match e.state {
+            HIDING => "hiding in the kelp",
+            FLEEING if self.stamina <= 0.0 => "fleeing, exhausted!",
+            FLEEING => "fleeing!",
+            _ if self.energy > 1.0 => "well fed",
+            _ if self.energy < 0.3 => "starving",
+            _ => "grazing",
+        };
         let species = FISH_KINDS[e.tags as usize].name;
-        Some(format!("{} the {species}\n{mood}, energy {:.0}%", self.name, self.energy * 100.0))
+        Some(format!("{} the {species}\n{mood}, energy {:.0}%, stamina {:.0}%", self.name, self.energy * 100.0, self.stamina * 100.0))
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_school_member(cx: &mut Ctx, sprites: [Sprite; 2], speed: f32, floor: Arc<Vec<f32>>, tags: u32, x: f32, y: f32, name: &'static str) {
+fn spawn_school_member(cx: &mut Ctx, sprites: [Sprite; 2], speed: f32, habitat: Arc<Habitat>, tags: u32, x: f32, y: f32, name: &'static str) {
     let right = cx.rng.chance(0.5);
     let sprite = sprites[right as usize].clone();
     let w = sprite.w() as i32;
@@ -288,7 +400,7 @@ fn spawn_school_member(cx: &mut Ctx, sprites: [Sprite; 2], speed: f32, floor: Ar
         .tags(tags)
         .fps(speed * 0.8)
         .hitbox(0, 0, w, 1)
-        .with(Fish { sprites, right, speed, energy, think, steer: (0.0, 0.0), shove: (0.0, 0.0), fleeing: false, name, floor });
+        .with(Fish { sprites, right, speed, energy, think, steer: (0.0, 0.0), shove: (0.0, 0.0), stamina: 1.0, alarm: 0.0, name, habitat });
     cx.spawn(e);
 }
 
@@ -314,14 +426,14 @@ impl Behavior for Shark {
             if leaving {
                 self.prey = None;
                 e.die_offscreen = true;
-            } else if cx.snap.get(self.prey.unwrap_or(0)).is_none() {
+            } else if cx.snap.get(self.prey.unwrap_or(0)).is_none_or(|p| p.state == HIDING) {
                 let (x, y) = (e.cx() as i32, e.cy() as i32);
                 let dist = |o: &Info| (o.pos.0 - x as f32).abs() + (o.pos.1 - y as f32).abs() * 2.0;
                 self.prey = cx
                     .snap
                     .query(x - 45, y - 18, 90, 36)
                     .into_iter()
-                    .filter(|o| o.kind == "fish")
+                    .filter(|o| o.kind == "fish" && o.state != HIDING)
                     .min_by(|a, b| dist(a).total_cmp(&dist(b)))
                     .map(|o| o.id);
             }
@@ -333,12 +445,13 @@ impl Behavior for Shark {
             let d = (dx * dx + dy * dy * 4.0).sqrt().max(0.1);
             vx = dx / d * 18.0;
             vy = dy / d * 9.0;
-            if d < 5.0 {
+            // The jaws are at the front of a long body.
+            if d < e.w() / 2.0 + 1.0 {
                 cx.kill(p.id);
                 self.meals += 1;
                 self.prey = None;
                 cx.add("eaten", 1.0);
-                cx.spawn(floating_text("CHOMP", Color::Rgb(255, 150, 150), p.pos.0, p.pos.1 - 1.0));
+                blood_cloud(cx, p.pos.0, p.pos.1);
                 cx.spawn(bubble(p.pos.0, p.pos.1));
             }
         } else if !leaving {
@@ -397,18 +510,101 @@ impl Behavior for Crab {
             e.vel.0 = -3.5;
         }
         let f = self.floor.get(e.pos.0.max(0.0) as usize).copied().unwrap_or(cx.h);
-        e.pos.1 = f - 1.0;
+        e.pos.1 = f - e.h();
     }
 }
 
-/// Deep lurker whose lure blinks on and off.
+/// Deep ambush predator: roams slowly, creeps toward fish near its lure, then lunges.
 struct Angler {
-    home: f32,
+    sprites: [Sprite; 2],
+    right: bool,
+    /// Where it is roaming to, and how long it rests on arrival.
+    goal: (f32, f32),
+    rest: f32,
+    /// Seconds until it is hungry again after a meal.
+    digest: f32,
+    think: f32,
+    prey: Option<Id>,
+    meals: u32,
 }
+
+impl Angler {
+    const STALK_RANGE: i32 = 20;
+    const LUNGE_RANGE: f32 = 9.0;
+}
+
 impl Behavior for Angler {
-    fn update(&mut self, e: &mut Entity, _cx: &mut Ctx, _dt: f32) {
-        e.vel.1 = (self.home - e.pos.1) * 0.3;
-        e.vel.0 = (e.age * 0.15).sin() * 1.5;
+    fn update(&mut self, e: &mut Entity, cx: &mut Ctx, dt: f32) {
+        self.digest -= dt;
+        self.rest -= dt;
+        self.think -= dt;
+        let mouth = (if self.right { e.pos.0 + e.w() } else { e.pos.0 }, e.cy());
+        if self.think <= 0.0 {
+            self.think = 0.4;
+            let lost = cx.snap.get(self.prey.unwrap_or(0)).is_none_or(|p| p.state == HIDING);
+            if self.digest > 0.0 {
+                self.prey = None;
+            } else if lost {
+                let r = Self::STALK_RANGE;
+                let dist = |o: &Info| (o.pos.0 - mouth.0).abs() + (o.pos.1 - mouth.1).abs() * 2.0;
+                self.prey = cx
+                    .snap
+                    .query(mouth.0 as i32 - r, mouth.1 as i32 - r / 2, r * 2, r)
+                    .into_iter()
+                    .filter(|o| o.kind == "fish" && o.state != HIDING)
+                    .min_by(|a, b| dist(a).total_cmp(&dist(b)))
+                    .map(|o| o.id);
+            }
+        }
+        // Prey that escapes the stalking range is given up on.
+        let prey = self.prey.and_then(|id| cx.snap.get(id)).filter(|p| {
+            (p.pos.0 - mouth.0).abs() <= Self::STALK_RANGE as f32 * 1.5
+        });
+        // Face a target only when clearly past it, which stops flip-flopping at close range.
+        let aim = if let Some(p) = prey {
+            let (dx, dy) = (p.pos.0 - mouth.0, p.pos.1 - mouth.1);
+            let d = (dx * dx + dy * dy * 4.0).sqrt().max(0.1);
+            let speed = if d < Self::LUNGE_RANGE { 15.0 } else { 2.5 };
+            e.vel = (dx / d * speed, dy / d * speed * 0.5);
+            if d < 2.5 {
+                cx.kill(p.id);
+                self.meals += 1;
+                self.prey = None;
+                self.digest = cx.rng.range(8.0, 20.0);
+                cx.add("eaten", 1.0);
+                blood_cloud(cx, p.pos.0, p.pos.1);
+            }
+            p.pos.0 - e.cx()
+        } else {
+            let dx = self.goal.0 - e.cx();
+            let dy = self.goal.1 - e.pos.1;
+            if dx.abs() < 2.0 && dy.abs() < 1.0 {
+                if self.rest <= 0.0 {
+                    self.rest = cx.rng.range(2.0, 7.0);
+                    self.goal = (
+                        cx.rng.range(8.0, (cx.w - 8.0).max(9.0)),
+                        cx.h - cx.rng.range(10.0, 18.0),
+                    );
+                }
+                e.vel = (0.0, 0.0);
+            } else if self.rest > 0.0 {
+                e.vel = (0.0, 0.0);
+            } else {
+                e.vel = (dx.signum() * 2.5, dy.clamp(-1.0, 1.0));
+            }
+            if self.rest > 0.0 { 0.0 } else { dx }
+        };
+        if aim.abs() > e.w() / 2.0 + 1.0 {
+            self.right = aim > 0.0;
+        }
+        let want = &self.sprites[self.right as usize];
+        if !Arc::ptr_eq(&e.sprite.frames, &want.frames) {
+            e.set_sprite(want.clone());
+        }
+    }
+
+    fn describe(&self, _e: &Entity) -> Option<String> {
+        Some(format!("Anglerfish\n{} fish lured in and eaten", self.meals))
     }
 }
 
@@ -669,7 +865,8 @@ const DOLPHIN: &str = "      __\n  \\ _/ o\\\n   \\___/>";
 const BIG_FISH: &str = "     ____\n  __/ o  \\_\n >__      __>\n    \\____/";
 const MONSTER_A: &str = "      __      __\n  .-.(  )-.-(  )-.\n_/   ' '   ' '   o>";
 const MONSTER_B: &str = "  __      __\n.(  )-.-(  )-.\n    ' '   ' '  o>";
-const SHARK: &str = "        |\\\n   ___/  \\____\n  /_  _       \\>\n    `-.___.--'";
+const SHARK: &str = "               |\\\n              /  \\\n    __.-------'   '-----.__\n\\_.'                 o     '-._\n _>   )))              ,,,,,,,_>\n/ '-._              __.-'
+      '---.___.---' \\|";
 const WHALE: &str = "      .-----:\n    .'       `.\n ,_/      (o)   \\\n \\`-.___________/";
 const WHALE_SPOUT: [&str; 3] = [
     "          \n          \n          \n",
@@ -683,6 +880,7 @@ const SHIP_MASK: &str = "     W    W    W\n    WWW  WWW  WWW\n   WWWWWWWWWWWWWWW
 pub struct Aquarium {
     next_special: f32,
     floor: Arc<Vec<f32>>,
+    habitat: Arc<Habitat>,
     shark_cd: f32,
     diver_cd: f32,
     trend_cd: f32,
@@ -720,7 +918,7 @@ impl Aquarium {
         let kind = &FISH_KINDS[tags as usize];
         let (x, y) = (cx.rng.range(4.0, cx.w - 8.0), cx.rng.range(WATER_Y + 5.0, cx.h * 0.75));
         let name = random_name(cx.rng);
-        spawn_school_member(cx, kind_sprites(kind), kind.speed, self.floor.clone(), tags, x, y, name);
+        spawn_school_member(cx, kind_sprites(kind), kind.speed, self.habitat.clone(), tags, x, y, name);
     }
 }
 
@@ -754,7 +952,7 @@ impl Scenario for Aquarium {
                         (y + cx.rng.range(-4.0, 4.0)).clamp(WATER_Y + 3.0, cx.h - 6.0),
                     );
                     let name = random_name(cx.rng);
-                    spawn_school_member(cx, sprites.clone(), kind.speed, self.floor.clone(), tag, fx, fy, name);
+                    spawn_school_member(cx, sprites.clone(), kind.speed, self.habitat.clone(), tag, fx, fy, name);
                 }
                 cx.news(format!("You added a school of {}.", kind.name), Some((x, y)));
             }
@@ -815,6 +1013,7 @@ impl Scenario for Aquarium {
         cx.spawn(Entity::new("ground", Sprite::one(self.backdrop(w, h))).z(100));
         cx.set("fish_cap", cx.w * cx.h / FISH_DENSITY);
 
+        let mut cover = vec![];
         // Forests of swaying kelp and little coral heads on the bottom.
         for _ in 0..(w / 4) {
             let x = cx.rng.int(0, w - 2);
@@ -825,6 +1024,9 @@ impl Scenario for Aquarium {
             let (b1, b2) = (s2.join("\n"), m2.join("\n"));
             let weed = Sprite::anim(&[(&a1, &a2), (&b1, &b2)]);
             let y = self.floor[x as usize] - tall as f32;
+            if tall >= 5 {
+                cover.push((x as f32, y + tall as f32 / 2.0));
+            }
             let rate = cx.rng.range(0.7, 1.6);
             cx.spawn(Entity::new("seaweed", weed).at(x as f32, y).z(cx_depth(x)).fps(rate));
         }
@@ -838,6 +1040,8 @@ impl Scenario for Aquarium {
             cx.spawn(Entity::new("seaweed", Sprite::mono(art, tint)).at(x as f32, y).z(60));
         }
 
+        self.habitat = Arc::new(Habitat { floor: self.floor.to_vec(), cover });
+
         // Each species swims as its own school, sized by how common it is.
         let total: f32 = FISH_KINDS.iter().map(|k| k.share).sum();
         let stock = cx.w * cx.h / FISH_DENSITY * 0.7;
@@ -849,7 +1053,7 @@ impl Scenario for Aquarium {
                 let x = (home.0 + cx.rng.range(-14.0, 14.0)).clamp(1.0, cx.w - 12.0);
                 let y = home.1 + cx.rng.range(-4.0, 4.0);
                 let name = random_name(cx.rng);
-                spawn_school_member(cx, sprites.clone(), kind.speed, self.floor.clone(), tag as u32, x, y, name);
+                spawn_school_member(cx, sprites.clone(), kind.speed, self.habitat.clone(), tag as u32, x, y, name);
             }
         }
 
@@ -864,8 +1068,20 @@ impl Scenario for Aquarium {
         for _ in 0..(w / 70).max(1) {
             let x = cx.rng.range(5.0, cx.w - 12.0);
             let home = cx.h - cx.rng.range(10.0, 16.0);
-            let angler = Sprite::anim(&[("  ,o\n<(@ )=<", "  YY\nKKKKKKK"), ("  ,.\n<(@ )=<", "  KK\nKKKKKKK")]);
-            cx.spawn(Entity::new("angler", angler).at(x, home).z(12).fps(1.2).with(Angler { home }));
+            let right = cx.rng.chance(0.5);
+            let sprite = angler_sprite();
+            let sprites = [sprite.mirrored(), sprite];
+            let start = sprites[right as usize].clone();
+            cx.spawn(Entity::new("angler", start).at(x, home).z(12).fps(1.2).with(Angler {
+                sprites,
+                right,
+                goal: (x, home),
+                rest: 0.0,
+                digest: 0.0,
+                think: 0.0,
+                prey: None,
+                meals: 0,
+            }));
         }
         self.shark_cd = 40.0;
         self.diver_cd = 30.0;
@@ -940,6 +1156,32 @@ impl Scenario for Aquarium {
     }
 }
 
+/// A kill: a red cloud that billows out and darkens as it thins, with scraps sinking through it.
+fn blood_cloud(cx: &mut Ctx, x: f32, y: f32) {
+    let shades = [Color::Rgb(235, 30, 40), Color::Rgb(170, 20, 34), Color::Rgb(95, 16, 36)];
+    for _ in 0..22 {
+        let glyph = *cx.rng.pick(&["~", "*", "%", "&", "."]);
+        let frames = shades.iter().map(|&c| Frame::parse(glyph, None, c, &[Color::White; 9])).collect();
+        let pix = shades.iter().map(|&c| PixFrame { w: 2, h: 2, px: vec![Some(c); 4] }).collect();
+        let a = cx.rng.range(0.0, std::f32::consts::TAU);
+        let speed = cx.rng.range(0.5, 5.0);
+        let life = cx.rng.range(1.5, 4.0);
+        cx.spawn(
+            Entity::new("spark", Sprite::new(frames).with_pixels(pix))
+                .at(x + a.cos() * 1.5, y)
+                .vel(a.cos() * speed, a.sin() * speed * 0.5 - 0.3)
+                .z(3)
+                .fps(3.0 / life)
+                .lifetime(life),
+        );
+    }
+    for _ in 0..3 {
+        let drift = cx.rng.range(-1.0, 1.0);
+        let scrap = Sprite::mono(">", Color::Rgb(226, 170, 150));
+        cx.spawn(Entity::new("spark", scrap).at(x, y).vel(drift, 2.2).z(3).lifetime(3.0));
+    }
+}
+
 /// Returns the name given to the new shark.
 fn spawn_shark(cx: &mut Ctx, x: f32, y: f32, appetite: u32, patience: f32) -> &'static str {
     let base = Sprite::mono(SHARK, Color::Rgb(130, 150, 175));
@@ -963,15 +1205,47 @@ fn spawn_plankton(cx: &mut Ctx, x: f32, y: f32) {
 
 fn spawn_jelly(cx: &mut Ctx, x: f32, y: f32) {
     let phase = cx.rng.range(0.0, 6.0);
-    let jelly = Sprite::anim(&[(" .-. \n(   )\n ||| ", " MMM \nMMMMM\n MMM "), (" .-. \n(   )\n/ | \\", " MMM \nMMMMM\nM M M")]);
-    cx.spawn(Entity::new("jelly", jelly).at(x, y).z(9).fps(1.6).with(Jelly { phase }));
+    let mask = "  MMMMM  \n MMMMMMM \n MMMMMMM \n  M M M  \n  M M M  ";
+    let bell = "  .-=-.  \n /     \\ \n \\_____/ \n";
+    let (a, b) = (format!("{bell}  ) | (  \n  ( | )  "), format!("{bell}  ( | )  \n  ) | (  "));
+    let px = |fronds: &str| {
+        PixFrame::parse(
+            &format!("...PPP...\n..PpppP..\n.PppppppP\n.PppPppP.\n.PPPPPPP.\n..P.P.P..\n{fronds}"),
+            FISH_PALETTE,
+        )
+    };
+    let sprite = Sprite::anim(&[(&a, mask), (&b, mask)]).with_pixels(vec![
+        px(".P..P..P.\n.P..P..P.\n..P.P.P..\n..P.P.P.."),
+        px("...P.P.P.\n..P..P..P\n.P..P..P.\n..P..P..P"),
+    ]);
+    cx.spawn(Entity::new("jelly", sprite).at(x, y).z(9).fps(1.6).with(Jelly { phase }));
 }
 
 fn spawn_crab(cx: &mut Ctx, x: f32, floor: Arc<Vec<f32>>) {
     let cd = cx.rng.range(0.0, 3.0);
-    let crab = Sprite::anim(&[("V(..)V", "RRRRRR"), ("v(..)v", "RRRRRR")]);
+    let mask = "RRRR    RRRR\n RRRRRRRRRR \n RRRWRRWRRR ";
+    let body = " \\\\_.--._// \n /_(o__o)_\\ ";
+    let (a, b) = (format!("(\\/)    (\\/)\n{body}"), format!("(||)    (||)\n{body}"));
+    let px = |claws: &str| {
+        PixFrame::parse(&format!("{claws}\n.D.DEEEED.D.\n..EEkEEkEE..\n..EDEEEEDE..\n.D.D.DD.D.D."), FISH_PALETTE)
+    };
+    let sprite = Sprite::anim(&[(&a, mask), (&b, mask)]).with_pixels(vec![
+        px("E.E......E.E\nEEE......EEE"),
+        px("EE........EE\nEEE......EEE"),
+    ]);
     let y = cx.h - 6.0;
-    cx.spawn(Entity::new("crab", crab).at(x, y).z(25).fps(3.0).with(Crab { floor, cd }));
+    cx.spawn(Entity::new("crab", sprite).at(x, y).z(25).fps(3.0).with(Crab { floor, cd }));
+}
+
+fn angler_sprite() -> Sprite {
+    let body = " |\\ .-''  '-.\n >(   @ VVVV)\n |/ '-.___.-'";
+    let (a, b) = (format!("        __,o \n{body}"), format!("        __,. \n{body}"));
+    let mask = "        KKKY \n KKKKKKKKKKKK\n KK   W WWWWK\n KKKKKKKKKKKK";
+    let rows = ".........GG.Y\n.......GG....\n.GGGGGGGGGG..\nG.GGGGGGWkGG.\nGGGGGGGGGGGG.\nG.GGGGGWWWWG.\n.GGGGGGGGGG..\n...G....G....";
+    Sprite::anim(&[(&a, mask), (&b, mask)]).with_pixels(vec![
+        PixFrame::parse(rows, FISH_PALETTE),
+        PixFrame::parse(&rows.replace('Y', "G"), FISH_PALETTE),
+    ])
 }
 
 /// World cells per fish at the population cap.

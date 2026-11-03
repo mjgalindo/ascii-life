@@ -193,6 +193,40 @@ fn bench(args: &[String]) {
         steps as f64 / el / 30.0,
         rayon::current_num_threads()
     );
+    // Drawing cost of a full-screen frame, at native zoom and fitted to the whole world.
+    let (cols, rows) = (200u16, 60u16);
+    let area = Rect::new(0, 0, cols, rows);
+    let fit = (world.w / cols as i32).max(world.h / rows as i32).max(1) + 1;
+    for (label, zoom, pixel) in [("ascii z1", 1, false), ("pixel z1", 1, true), ("pixel fit", fit, true)] {
+        let view = View { x: 0.0, y: 0.0, zoom, pixel };
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let start = Instant::now();
+        for _ in 0..10 {
+            draw_world(&world, &mut buf, area, &view, None);
+        }
+        println!("  draw {label}: {:.1} ms", start.elapsed().as_secs_f64() * 100.0);
+    }
+}
+
+/// The locale in effect, following POSIX precedence.
+fn locale() -> String {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_default()
+}
+
+/// Pixel mode needs 24-bit color and the half-block glyph. Terminals cannot be queried for
+/// these without a slow round trip, so this reads what the environment advertises.
+fn pixel_capable(colorterm: &str, term: &str, term_program: &str, locale: &str) -> bool {
+    let upper = locale.to_uppercase();
+    let utf8 = upper.contains("UTF-8") || upper.contains("UTF8");
+    let truecolor = matches!(colorterm.to_lowercase().as_str(), "truecolor" | "24bit")
+        || term.contains("truecolor")
+        || term.contains("24bit")
+        || ["kitty", "alacritty", "wezterm", "foot", "ghostty"].iter().any(|t| term.contains(t))
+        || matches!(term_program, "iTerm.app" | "WezTerm" | "vscode" | "ghostty");
+    utf8 && truecolor && term != "linux" && term != "dumb"
 }
 
 /// Random creature on the move for the director to watch.
@@ -226,7 +260,9 @@ fn main() -> std::io::Result<()> {
     let term = (size.width as i32, (size.height as i32 - 2).max(1));
     let mut world = new_world(index, forced, term);
     let mut view = View::new();
-    view.pixel = args.iter().any(|a| a == "--pixel");
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    let capable = pixel_capable(&var("COLORTERM"), &var("TERM"), &var("TERM_PROGRAM"), &locale());
+    view.pixel = args.iter().any(|a| a == "--pixel") || (capable && !args.iter().any(|a| a == "--ascii"));
     let mut selected: Option<engine::Id> = None;
     let mut follow = false;
     let mut drag: Option<(i32, i32, bool)> = None;
@@ -497,4 +533,19 @@ fn main() -> std::io::Result<()> {
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pixel_capable;
+
+    #[test]
+    fn detects_pixel_support() {
+        assert!(pixel_capable("truecolor", "xterm-256color", "", "en_US.UTF-8"));
+        assert!(pixel_capable("", "xterm-kitty", "", "es_ES.utf8"));
+        assert!(pixel_capable("", "xterm-256color", "iTerm.app", "en_US.UTF-8"));
+        assert!(!pixel_capable("", "xterm-256color", "", "en_US.UTF-8"));
+        assert!(!pixel_capable("truecolor", "xterm-256color", "", "C"));
+        assert!(!pixel_capable("truecolor", "linux", "", "en_US.UTF-8"));
+    }
 }

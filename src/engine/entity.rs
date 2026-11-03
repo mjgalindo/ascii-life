@@ -11,7 +11,7 @@ const SCENERY_KINDS: &[&str] = &[
 ];
 
 /// Per-entity logic. Every hook is optional; entities without a behavior simply drift with `vel`.
-pub trait Behavior: Send {
+pub trait Behavior: Send + Sync {
     fn update(&mut self, _e: &mut Entity, _cx: &mut Ctx, _dt: f32) {}
     fn on_collide(&mut self, _e: &mut Entity, _other: &Info, _cx: &mut Ctx) {}
     fn on_death(&mut self, _e: &Entity, _cx: &mut Ctx) {}

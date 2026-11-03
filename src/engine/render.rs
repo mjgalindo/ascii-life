@@ -7,6 +7,7 @@ use rayon::prelude::*;
 
 type Rgb = [u8; 3];
 
+const LIGHT_STEPS: f32 = 40.0;
 const NIGHT: [f32; 3] = [8.0, 10.0, 40.0];
 
 /// Camera over the world. Positions are in world cells; `zoom` is how many world cells
@@ -93,10 +94,22 @@ fn color(c: Rgb) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
+/// Light level in coarse steps. Fine steps would recolor every cell each frame, and
+/// terminals pay for every changed cell, which floods them with output on large screens.
+fn light(world: &World) -> f32 {
+    (world.daylight * LIGHT_STEPS).round() / LIGHT_STEPS
+}
+
 pub fn draw_world(world: &World, buf: &mut Buffer, area: Rect, view: &View, selected: Option<Id>) {
     let bg = world.scenario.as_ref().map_or([0, 0, 0], |s| to_rgb(s.background()));
     // Far-to-near: higher z is drawn first.
-    let mut order: Vec<&_> = world.ents.iter().filter(|e| e.alive).collect();
+    let (vx, vy) = view.origin();
+    let (span_x, span_y) = (area.width as i32 * view.zoom.max(1), area.height as i32 * view.zoom.max(1));
+    let on_screen = |e: &&super::entity::Entity| {
+        let (x, y) = (e.pos.0.round() as i32, e.pos.1.round() as i32);
+        x < vx + span_x && y < vy + span_y && x + e.sprite.w() as i32 * 2 > vx && y + e.sprite.h() as i32 * 2 > vy
+    };
+    let mut order: Vec<&_> = world.ents.iter().filter(|e| e.alive).filter(on_screen).collect();
     order.sort_by_key(|e| (-e.z, e.id));
     if view.pixel {
         draw_pixels(world, buf, area, view, selected, &order, bg);
@@ -177,8 +190,8 @@ fn draw_ascii(
             };
             let cell = &mut buf[(area.x + sx as u16, area.y + sy as u16)];
             cell.set_char(glyph);
-            cell.set_fg(color(shade_ink(fg, world.daylight)));
-            cell.set_bg(color(shade(cbg, world.daylight)));
+            cell.set_fg(color(shade_ink(fg, light(world))));
+            cell.set_bg(color(shade(cbg, light(world))));
             if sel {
                 cell.set_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
             }
@@ -287,7 +300,7 @@ fn draw_pixels(
         let n = (z * z) as u32;
         [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8]
     };
-    let daylight = world.daylight;
+    let daylight = light(world);
     let cells: Vec<(Rgb, Rgb)> = (0..rows * cols)
         .into_par_iter()
         .map(|i| {
@@ -325,7 +338,7 @@ fn draw_pixels(
                         ((top[2] as u16 + bottom[2] as u16) / 2) as u8,
                     ];
                     cell.set_char(g);
-                    cell.set_fg(color(shade_ink(to_rgb(f.fg[(fy as usize) * f.w + fx as usize]), world.daylight)));
+                    cell.set_fg(color(shade_ink(to_rgb(f.fg[(fy as usize) * f.w + fx as usize]), daylight)));
                     cell.set_bg(color(mid));
                 }
             }

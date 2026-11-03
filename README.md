@@ -2,7 +2,7 @@
 
 Whole living worlds in your terminal. It started as "asciiquarium, but to the 100th power" and became a small Rust and [ratatui](https://ratatui.rs) simulation engine with five worlds: an aquarium, a zoo, a village, a traffic grid and a city that mixes them all. Everything runs on its own, with sharks hunting, lions escaping, houses burning and tow trucks clearing wrecks. A news ticker tells you what just happened, and you can click any creature to read its bio. Or press `a` and add a shark yourself.
 
-Every world can be drawn as ASCII or as half-block pixel art, and `m` switches between them.
+Every world can be drawn as ASCII or as half-block pixel art, and `m` switches between them. It starts in pixel mode when the terminal advertises 24-bit color and a UTF-8 locale, otherwise in ASCII. `--pixel` and `--ascii` override that.
 
 ![Aquarium in pixel mode, with schools of drawn fish, a whale, a shark and a kelp-covered seabed](docs/screenshots/aquarium-pixel.png)
 

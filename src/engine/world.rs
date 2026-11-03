@@ -38,7 +38,8 @@ pub struct Snapshot {
     gw: i32,
     gh: i32,
     by_id: FastMap<Id, u32>,
-    counts: FastMap<&'static str, usize>,
+    /// Indices of each kind, so rare kinds can be scanned without touching the crowd.
+    kinds: FastMap<&'static str, Vec<u32>>,
     /// Entities spanning many grid cells (backdrops); scanned linearly instead of indexed.
     big: Vec<u32>,
 }
@@ -52,7 +53,7 @@ impl Snapshot {
             gw: 0,
             gh: 0,
             by_id: FastMap::default(),
-            counts: FastMap::default(),
+            kinds: FastMap::default(),
             big: vec![],
         }
     }
@@ -60,7 +61,7 @@ impl Snapshot {
     fn build(ents: &[Entity], w: i32, h: i32) -> Snapshot {
         let gw = (w / CELL_W + 1).max(1);
         let gh = (h / CELL_H + 1).max(1);
-        let infos: Vec<Info> = ents.iter().filter(|e| e.alive && !e.scenery).map(Info::of).collect();
+        let infos: Vec<Info> = ents.par_iter().filter(|e| e.alive && !e.scenery).map(Info::of).collect();
         let mut s = Snapshot {
             infos,
             cell_start: vec![],
@@ -68,7 +69,7 @@ impl Snapshot {
             gw,
             gh,
             by_id: FastMap::default(),
-            counts: FastMap::default(),
+            kinds: FastMap::default(),
             big: vec![],
         };
         s.by_id.reserve(s.infos.len());
@@ -80,7 +81,7 @@ impl Snapshot {
         for (idx, sp) in spans.iter().enumerate() {
             let info = &s.infos[idx];
             s.by_id.insert(info.id, idx as u32);
-            *s.counts.entry(info.kind).or_insert(0) += 1;
+            s.kinds.entry(info.kind).or_default().push(idx as u32);
             if (sp.2 - sp.0 + 1) * (sp.3 - sp.1 + 1) > 16 {
                 s.big.push(idx as u32);
                 continue;
@@ -125,31 +126,40 @@ impl Snapshot {
 
     /// Entities whose bounds overlap the rectangle.
     pub fn query(&self, x: i32, y: i32, w: i32, h: i32) -> Vec<&Info> {
+        let mut out = Vec::new();
+        self.each(x, y, w, h, |i| out.push(i));
+        out
+    }
+
+    /// Visits overlapping entities once each, without allocating.
+    pub fn each<'s>(&'s self, x: i32, y: i32, w: i32, h: i32, mut visit: impl FnMut(&'s Info)) {
         if self.cell_start.is_empty() {
-            return vec![];
+            return;
         }
         let (x0, y0, x1, y1) = self.cells((x, y, w, h));
-        let mut out: Vec<&Info> = Vec::new();
         for &i in &self.big {
             let inf = &self.infos[i as usize];
             if overlaps(inf.rect, (x, y, w, h)) {
-                out.push(inf);
+                visit(inf);
             }
         }
-        let multi = x1 > x0 || y1 > y0;
         for cy in y0..=y1 {
             for cx in x0..=x1 {
                 let c = (cy * self.gw + cx) as usize;
                 let range = self.cell_start[c] as usize..self.cell_start[c + 1] as usize;
                 for &i in &self.cell_items[range] {
                     let inf = &self.infos[i as usize];
-                    if overlaps(inf.rect, (x, y, w, h)) && (!multi || !out.iter().any(|o| o.id == inf.id)) {
-                        out.push(inf);
+                    if !overlaps(inf.rect, (x, y, w, h)) {
+                        continue;
+                    }
+                    // An entity spanning cells counts only in the first cell shared with the query.
+                    let own = self.cells(inf.rect);
+                    if own.0.max(x0) == cx && own.1.max(y0) == cy {
+                        visit(inf);
                     }
                 }
             }
         }
-        out
     }
 
     pub fn get(&self, id: Id) -> Option<&Info> {
@@ -157,11 +167,11 @@ impl Snapshot {
     }
 
     pub fn count(&self, kind: &str) -> usize {
-        self.counts.get(kind).copied().unwrap_or(0)
+        self.kinds.get(kind).map_or(0, Vec::len)
     }
 
-    pub fn of_kind<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a Info> {
-        self.infos.iter().filter(move |i| i.kind == kind)
+    pub fn of_kind<'a>(&'a self, kind: &str) -> impl Iterator<Item = &'a Info> {
+        self.kinds.get(kind).into_iter().flatten().map(|&i| &self.infos[i as usize])
     }
 }
 
@@ -394,9 +404,7 @@ impl World {
             }
         }
         if !killed.is_empty() {
-            for e in self.ents.iter_mut().filter(|e| killed.contains(&e.id)) {
-                e.alive = false;
-            }
+            self.ents.par_iter_mut().filter(|e| killed.contains(&e.id)).for_each(|e| e.alive = false);
         }
         self.ents.append(&mut spawned);
     }
@@ -500,17 +508,19 @@ impl World {
         }
 
         // Followers snap to their parent; orphans die with it.
-        let mut positions: HashMap<Id, (f32, f32)> =
-            self.ents.iter().filter(|e| e.alive).map(|e| (e.id, e.pos)).collect();
-        for e in self.ents.iter_mut().filter(|e| e.alive) {
-            if let Some(f) = e.follow {
-                match positions.get(&f.parent) {
-                    Some(p) => {
-                        e.pos = (p.0 + f.dx, p.1 + f.dy);
-                        e.vel = (0.0, 0.0);
-                        positions.insert(e.id, e.pos);
+        if self.ents.iter().any(|e| e.follow.is_some()) {
+            let mut positions: FastMap<Id, (f32, f32)> =
+                self.ents.iter().filter(|e| e.alive).map(|e| (e.id, e.pos)).collect();
+            for e in self.ents.iter_mut().filter(|e| e.alive) {
+                if let Some(f) = e.follow {
+                    match positions.get(&f.parent) {
+                        Some(p) => {
+                            e.pos = (p.0 + f.dx, p.1 + f.dy);
+                            e.vel = (0.0, 0.0);
+                            positions.insert(e.id, e.pos);
+                        }
+                        None => e.alive = false,
                     }
-                    None => e.alive = false,
                 }
             }
         }
