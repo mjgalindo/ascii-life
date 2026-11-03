@@ -253,7 +253,8 @@ impl Behavior for Fish {
         e.vel.0 += (self.steer.0 - e.vel.0) * k;
         e.vel.1 += (self.steer.1 - e.vel.1) * k;
         e.pos.0 = (e.pos.0 + self.shove.0 * dt * 3.0).clamp(0.0, cx.w - e.w());
-        e.pos.1 = (e.pos.1 + self.shove.1 * dt * 3.0).clamp(WATER_Y + 2.0, cx.h - e.h());
+        let bed = self.floor.get(e.cx().max(0.0) as usize).copied().unwrap_or(cx.h);
+        e.pos.1 = (e.pos.1 + self.shove.1 * dt * 3.0).clamp(WATER_Y + 2.0, (bed - e.h()).max(WATER_Y + 2.0));
         let right = e.vel.0 > 0.0;
         if right != self.right {
             self.right = right;

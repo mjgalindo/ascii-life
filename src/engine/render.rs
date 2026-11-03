@@ -242,7 +242,8 @@ fn draw_pixels(
     let mut px: Vec<Rgb> = vec![bg; (pw * ph) as usize];
     let (wx0, wy0) = view.origin();
 
-    for e in order {
+    // Text sprites are drawn afterwards as glyphs, never as pixels.
+    for e in order.iter().filter(|e| !e.sprite.overlay) {
         let f = e.sprite.pixel_frame(e.frame);
         // Vertical motion is resolved to half cells.
         let ox = e.pos.0.round() as i32 - wx0;

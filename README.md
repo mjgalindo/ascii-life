@@ -1,6 +1,26 @@
 # ascii-zoo
 
-A tiny ASCII simulation engine in Rust (ratatui), in the spirit of asciiquarium. Worlds are *scenarios*: each one only defines its entities and spawn rules.
+Whole living worlds in your terminal. It started as "asciiquarium, but to the 100th power" and became a small Rust and [ratatui](https://ratatui.rs) simulation engine with five worlds: an aquarium, a zoo, a village, a traffic grid and a city that mixes them all. Everything runs on its own, with sharks hunting, lions escaping, houses burning and tow trucks clearing wrecks. A news ticker tells you what just happened, and you can click any creature to read its bio. Or press `a` and add a shark yourself.
+
+Every world can be drawn as ASCII or as half-block pixel art, and `m` switches between them.
+
+![Aquarium in pixel mode, with schools of drawn fish, a whale, a shark and a kelp-covered seabed](docs/screenshots/aquarium-pixel.png)
+
+The same aquarium as text:
+
+![Aquarium in ASCII mode](docs/screenshots/aquarium-ascii.png)
+
+| Zoo | Village |
+|---|---|
+| ![Zoo pens with herds of penguins, lions, crocodiles and more along a walking strip](docs/screenshots/zoo-pixel.png) | ![Village houses, fields and villagers going about their day](docs/screenshots/village-pixel.png) |
+
+| Traffic | City |
+|---|---|
+| ![Road grid with signals, cars and buses](docs/screenshots/traffic-pixel.png) | ![City blocks holding zoo pens, fish tanks, farms and parks between roads](docs/screenshots/city-pixel.png) |
+
+The screenshots are real frames from `--dump` run through `tools/render.py`, so they leave out the status bar and overlays.
+
+## Running it
 
 ```
 cargo run --release [aquarium|traffic|zoo|village|city]
