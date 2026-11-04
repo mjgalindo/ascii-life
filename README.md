@@ -4,7 +4,11 @@ Whole living worlds in your terminal. It started as "asciiquarium, but to the 10
 
 Everything runs on its own. Sharks hunt, fish scatter and hide in the kelp, lions escape, houses burn and tow trucks clear wrecks. A news ticker tells you what just happened, and you can click any creature to read its bio. Or press `a` and add a shark yourself.
 
+![The aquarium in the 3D view, with the camera swaying past schools of fish over the sea bed](docs/screenshots/aquarium-3d.gif)
+
 ![A 440x130 aquarium with schools of fish, jellyfish, a shark, crabs and anglerfish over a kelp-covered sea bed](docs/screenshots/aquarium-pixel.png)
+
+Want to see it big? Here is a 4000x1600 city after 9,000 ticks, at 12000x9600 pixels, [from above](docs/screenshots/city-huge.png) and [in 3D](docs/screenshots/city-huge-3d.png).
 
 ## The worlds
 
@@ -92,6 +96,7 @@ Press `v` to see the running world in perspective, as pixels or as text. The sim
 cargo run --release -- --dump zoo 30 120 40        # headless: print one frame after 30s
 cargo run --release -- --bench city 60 600 200     # simulation and drawing speed
 python3 tools/screenshots.py                       # regenerate the images here (needs Pillow)
+python3 tools/record_gif.py                        # regenerate the 3D clip (also needs ffmpeg)
 ```
 
 `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `CAM3D=yaw,pitch`, `RIDE=kind`, `SEED=n` and `OUT=cells.txt` tune `--dump`, and `tools/render.py cells.txt out.png` turns a cell dump into an image. The screenshots are real frames made this way, so they leave out the status bar and overlays.
