@@ -2,6 +2,7 @@
 
 pub mod entity;
 pub mod render;
+pub mod render3d;
 pub mod rng;
 pub mod sprite;
 pub mod world;

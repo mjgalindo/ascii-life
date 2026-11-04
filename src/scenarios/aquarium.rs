@@ -940,6 +940,10 @@ impl Aquarium {
 }
 
 impl Scenario for Aquarium {
+    fn space(&self) -> crate::engine::world::Space {
+        crate::engine::world::Space::Tank
+    }
+
     fn name(&self) -> &'static str {
         "aquarium"
     }

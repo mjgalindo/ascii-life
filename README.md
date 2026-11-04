@@ -64,6 +64,8 @@ It starts in half-block pixel art when the terminal advertises 24-bit color and 
 | `j` | jump to the latest news |
 | `l`, `n` | news log, minimap |
 | `m` | ASCII or pixel rendering |
+| `v` | 3D view |
+| `,` `.` and `;` `'` | orbit and tilt the 3D camera |
 | `+`, `-`, `t` | change speed, turbo (uses all CPU) |
 | `space`, `r` | pause, reset |
 | `?`, `q` | help, quit |
@@ -79,6 +81,10 @@ Updates run in parallel with rayon and stay deterministic: the same seed gives t
 
 To add a world, implement `Scenario` in `src/scenarios/mything.rs` and register it in `src/scenarios/mod.rs`. Implement `tools` and `place` to fill its add menu.
 
+## 3D view
+
+Press `v` to see the running world in perspective, as pixels or as text. The simulation itself stays flat, so the view changes nothing about what happens. Ground worlds stand their sprites on the map and raise buildings into blocks. The aquarium becomes a tank, with each creature at its own fixed depth, so a shark can catch a fish that looks some way off.
+
 ## Tooling
 
 ```
@@ -87,4 +93,4 @@ cargo run --release -- --bench city 60 600 200     # simulation and drawing spee
 python3 tools/screenshots.py                       # regenerate the images here (needs Pillow)
 ```
 
-`WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `SEED=n` and `OUT=cells.txt` tune `--dump`, and `tools/render.py cells.txt out.png` turns a cell dump into an image. The screenshots are real frames made this way, so they leave out the status bar and overlays.
+`WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `CAM3D=yaw,pitch`, `SEED=n` and `OUT=cells.txt` tune `--dump`, and `tools/render.py cells.txt out.png` turns a cell dump into an image. The screenshots are real frames made this way, so they leave out the status bar and overlays.

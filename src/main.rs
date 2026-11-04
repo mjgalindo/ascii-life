@@ -4,6 +4,8 @@ mod scenarios;
 mod ui;
 
 use engine::render::{draw_world, hud_style, pick, View, MAX_ZOOM};
+use engine::render3d::{pick_3d, unproject, PITCH_RANGE};
+use engine::world::Space;
 use engine::World;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -28,6 +30,8 @@ const MIN_FITTED: (i32, i32) = (40, 16);
 const RESIZE_SETTLE: Duration = Duration::from_millis(300);
 /// Seconds the director stays on a subject before looking for another.
 const DIRECTOR_SHOT: f32 = 14.0;
+/// Radians the 3D camera orbits per key press.
+const ORBIT_STEP: f32 = 0.12;
 
 fn seed() -> u64 {
     if let Some(v) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
@@ -104,11 +108,19 @@ fn view_from_env() -> View {
         }
     }
     v.pixel = std::env::var("PIXEL").is_ok();
+    if let Ok(s) = std::env::var("CAM3D") {
+        let n: Vec<f32> = s.split(',').filter_map(|p| p.parse().ok()).collect();
+        v.three_d = true;
+        if n.len() >= 2 {
+            v.yaw = n[0];
+            v.pitch = n[1];
+        }
+    }
     v
 }
 
 /// Headless mode: `--dump <scenario> <seconds> [cols rows]` renders one frame.
-/// `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1` and `OUT=file` (cell dump for tools/render.py) are optional.
+/// `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `CAM3D=yaw,pitch` and `OUT=file` (cell dump for tools/render.py) are optional.
 fn dump(args: &[String]) {
     let Some(name) = args.first() else {
         eprintln!("usage: --dump <world> [seconds] [cols] [rows]");
@@ -197,8 +209,8 @@ fn bench(args: &[String]) {
     let (cols, rows) = (200u16, 60u16);
     let area = Rect::new(0, 0, cols, rows);
     let fit = (world.w / cols as i32).max(world.h / rows as i32).max(1) + 1;
-    for (label, zoom, pixel) in [("ascii z1", 1, false), ("pixel z1", 1, true), ("pixel fit", fit, true)] {
-        let view = View { x: 0.0, y: 0.0, zoom, pixel };
+    for (label, zoom, pixel, three_d) in [("ascii z1", 1, false, false), ("pixel z1", 1, true, false), ("pixel fit", fit, true, false), ("3d z1", 1, true, true), ("3d fit", fit, true, true)] {
+        let view = View { zoom, pixel, three_d, ..View::new() };
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let start = Instant::now();
         for _ in 0..10 {
@@ -364,7 +376,7 @@ fn main() -> std::io::Result<()> {
                     if director { "DIRECTOR " } else { "" },
                     effective,
                     view.zoom,
-                    if view.pixel { "pixel" } else { "ascii" },
+                    if view.three_d { format!("3d {}", if view.pixel { "pixel" } else { "ascii" }) } else { (if view.pixel { "pixel" } else { "ascii" }).to_string() },
                     world.ents.len(),
                     extra
                 );
@@ -379,6 +391,7 @@ fn main() -> std::io::Result<()> {
                         let (sx, sy) = (view.zoom as f32 * 4.0 * fast, view.zoom as f32 * 2.0 * fast);
                         let (mx, my) = (cols / 2, rows / 2);
                         let tools = world.scenario.as_ref().map_or(0, |s| s.tools().len());
+                        let ground = world.scenario.as_ref().is_some_and(|s| s.space() == Space::Ground);
                         match k.code {
                             KeyCode::Esc if menu_open => {
                                 menu_open = false;
@@ -437,6 +450,15 @@ fn main() -> std::io::Result<()> {
                             KeyCode::Char('-') => speed = (speed / 2.0).max(0.125),
                             KeyCode::Char('t') => turbo = !turbo,
                             KeyCode::Char('m') => view.pixel = !view.pixel,
+                            KeyCode::Char('v') => view.three_d = !view.three_d,
+                            KeyCode::Char(',') if view.three_d => view.yaw -= ORBIT_STEP,
+                            KeyCode::Char('.') if view.three_d => view.yaw += ORBIT_STEP,
+                            KeyCode::Char(';') if view.three_d => {
+                                view.pitch = (view.pitch - ORBIT_STEP).clamp(PITCH_RANGE.0, PITCH_RANGE.1)
+                            }
+                            KeyCode::Char('\'') if view.three_d => {
+                                view.pitch = (view.pitch + ORBIT_STEP).clamp(PITCH_RANGE.0, PITCH_RANGE.1)
+                            }
                             KeyCode::Char('x') | KeyCode::Char(']') => view.zoom_at(view.zoom * 2, mx, my),
                             KeyCode::Char('z') | KeyCode::Char('[') => view.zoom_at(view.zoom / 2, mx, my),
                             KeyCode::Char('g') => {
@@ -466,10 +488,10 @@ fn main() -> std::io::Result<()> {
                                     view.y = p.1 - (rows * view.zoom) as f32 / 2.0;
                                 }
                             }
-                            KeyCode::Left | KeyCode::Char('a') => view.x -= sx,
-                            KeyCode::Right | KeyCode::Char('d') => view.x += sx,
-                            KeyCode::Up | KeyCode::Char('w') => view.y -= sy,
-                            KeyCode::Down | KeyCode::Char('s') => view.y += sy,
+                            KeyCode::Left | KeyCode::Char('a') => view.pan(-sx, 0.0, ground),
+                            KeyCode::Right | KeyCode::Char('d') => view.pan(sx, 0.0, ground),
+                            KeyCode::Up | KeyCode::Char('w') => view.pan(0.0, -sy, ground),
+                            KeyCode::Down | KeyCode::Char('s') => view.pan(0.0, sy, ground),
                             _ => {}
                         }
                     }
@@ -481,8 +503,8 @@ fn main() -> std::io::Result<()> {
                         MouseEventKind::Drag(MouseButton::Left) => {
                             if let Some((px, py, _)) = drag {
                                 let (dx, dy) = (m.column as i32 - px, m.row as i32 - py);
-                                view.x -= (dx * view.zoom) as f32;
-                                view.y -= (dy * view.zoom) as f32;
+                                let ground = world.scenario.as_ref().is_some_and(|s| s.space() == Space::Ground);
+                                view.pan(-(dx * view.zoom) as f32, -(dy * view.zoom) as f32, ground);
                                 follow = false;
                                 drag = Some((m.column as i32, m.row as i32, true));
                             }
@@ -490,11 +512,22 @@ fn main() -> std::io::Result<()> {
                         MouseEventKind::Up(MouseButton::Left) => {
                             if let (Some((_, _, false)), Some(tool)) = (drag, armed) {
                                 drag = None;
-                                let x = view.x + (m.column as i32 * view.zoom) as f32;
-                                let y = view.y + (m.row as i32 * view.zoom) as f32;
-                                world.place(tool, x, y);
+                                let spot = if view.three_d {
+                                    unproject(&world, &view, cols, rows, m.column as i32, m.row as i32)
+                                } else {
+                                    let x = view.x + (m.column as i32 * view.zoom) as f32;
+                                    let y = view.y + (m.row as i32 * view.zoom) as f32;
+                                    Some((x, y))
+                                };
+                                if let Some((x, y)) = spot {
+                                    world.place(tool, x, y);
+                                }
                             } else if let Some((_, _, false)) = drag.take() {
-                                selected = pick(&world, &view, m.column as i32, m.row as i32);
+                                selected = if view.three_d {
+                                    pick_3d(&world, &view, cols, rows, m.column as i32, m.row as i32)
+                                } else {
+                                    pick(&world, &view, m.column as i32, m.row as i32)
+                                };
                             }
                         }
                         MouseEventKind::ScrollUp => {

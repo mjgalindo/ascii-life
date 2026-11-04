@@ -19,7 +19,7 @@ target/release/ascii-zoo --dump <world> <seconds> <cols> <rows>
 python3 tools/screenshots.py
 ```
 
-`--dump` takes `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `SEED=n` and `OUT=file`. Worlds are aquarium, traffic, zoo, village, city and gallery.
+`--dump` takes `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `CAM3D=yaw,pitch`, `SEED=n` and `OUT=file`. Worlds are aquarium, traffic, zoo, village, city and gallery.
 
 ## Layout
 
@@ -27,6 +27,7 @@ python3 tools/screenshots.py
 - `src/ui.rs`: ticker, log, help, inspector, minimap, tools panel.
 - `src/engine/`: entities, sprites, world update, spatial snapshot, rendering. Knows nothing about specific worlds.
 - `src/scenarios/`: one file per world, registered in `mod.rs`. `traffic.rs` also provides the city.
+- `src/engine/render3d.rs`: perspective view, render only. `Scenario::space` picks how a world maps to 3D.
 - `src/art.rs`: procedural pixel art.
 
 ## Rules that are easy to break

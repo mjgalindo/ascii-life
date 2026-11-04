@@ -18,13 +18,17 @@ pub struct View {
     pub y: f32,
     pub zoom: i32,
     pub pixel: bool,
+    /// Selects the perspective renderer; `yaw` and `pitch` orbit its camera, in radians.
+    pub three_d: bool,
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
 pub const MAX_ZOOM: i32 = 16;
 
 impl View {
     pub fn new() -> View {
-        View { x: 0.0, y: 0.0, zoom: 1, pixel: false }
+        View { x: 0.0, y: 0.0, zoom: 1, pixel: false, three_d: false, yaw: 0.35, pitch: 0.45 }
     }
 
     /// Keeps the camera inside the world, centering when the world is smaller than the screen.
@@ -47,12 +51,25 @@ impl View {
         self.y = wy - (cy * nz) as f32;
     }
 
+    /// Moves the camera by screen-aligned amounts in world cells. Ground worlds pan along the
+    /// orbited ground plane; other views keep the world axes.
+    pub fn pan(&mut self, dx: f32, dy: f32, ground: bool) {
+        if self.three_d && ground {
+            let (s, c) = self.yaw.sin_cos();
+            self.x += c * dx - s * dy * 2.0;
+            self.y += (s * dx + c * dy * 2.0) / 2.0;
+        } else {
+            self.x += dx;
+            self.y += dy;
+        }
+    }
+
     fn origin(&self) -> (i32, i32) {
         (self.x.floor() as i32, self.y.floor() as i32)
     }
 }
 
-fn to_rgb(c: Color) -> Rgb {
+pub(super) fn to_rgb(c: Color) -> Rgb {
     match c {
         Color::Rgb(r, g, b) => [r, g, b],
         Color::Black => [0, 0, 0],
@@ -66,12 +83,12 @@ fn to_rgb(c: Color) -> Rgb {
     }
 }
 
-fn shade(c: Rgb, daylight: f32) -> Rgb {
+pub(super) fn shade(c: Rgb, daylight: f32) -> Rgb {
     shade_by(c, (1.0 - daylight) * 0.55)
 }
 
 /// Glyphs darken less than what is behind them so text stays readable at night.
-fn shade_ink(c: Rgb, daylight: f32) -> Rgb {
+pub(super) fn shade_ink(c: Rgb, daylight: f32) -> Rgb {
     shade_by(c, (1.0 - daylight) * 0.2)
 }
 
@@ -86,21 +103,24 @@ fn shade_by(c: Rgb, k: f32) -> Rgb {
     ]
 }
 
-fn lighten(c: Rgb) -> Rgb {
+pub(super) fn lighten(c: Rgb) -> Rgb {
     [c[0] / 2 + 128, c[1] / 2 + 128, c[2] / 2 + 128]
 }
 
-fn color(c: Rgb) -> Color {
+pub(super) fn color(c: Rgb) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
 /// Light level in coarse steps. Fine steps would recolor every cell each frame, and
 /// terminals pay for every changed cell, which floods them with output on large screens.
-fn light(world: &World) -> f32 {
+pub(super) fn light(world: &World) -> f32 {
     (world.daylight * LIGHT_STEPS).round() / LIGHT_STEPS
 }
 
 pub fn draw_world(world: &World, buf: &mut Buffer, area: Rect, view: &View, selected: Option<Id>) {
+    if view.three_d {
+        return super::render3d::draw_world_3d(world, buf, area, view, selected);
+    }
     let bg = world.scenario.as_ref().map_or([0, 0, 0], |s| to_rgb(s.background()));
     // Far-to-near: higher z is drawn first.
     let (vx, vy) = view.origin();

@@ -296,6 +296,15 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// How a world's flat coordinates map onto space in the perspective view.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Space {
+    /// Seen from above: `y` runs along the ground and sprites stand on it.
+    Ground,
+    /// Seen from the side: `y` is height, and creatures spread out behind the glass.
+    Tank,
+}
+
 /// A themed world: supplies the initial population and spawns new life over time.
 pub trait Scenario {
     fn name(&self) -> &'static str;
@@ -321,6 +330,9 @@ pub trait Scenario {
     /// Whether the world is exactly as large as the screen, with no scrolling.
     fn fits_terminal(&self) -> bool {
         false
+    }
+    fn space(&self) -> Space {
+        Space::Ground
     }
     /// Extra status text for the HUD.
     fn hud(&self, _globals: &Globals, _daylight: f32) -> String {

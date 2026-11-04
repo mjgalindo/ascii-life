@@ -20,6 +20,7 @@ const HELP: &[&str] = &[
     "",
     "arrows/wasd or drag   pan        z x / wheel  zoom",
     "g          fit world             m     ascii / pixel",
+    "v          3D view               , . ; '  orbit, tilt",
     "",
     "click      inspect a creature    f     follow it",
     "c          director: camera chases the action",
@@ -128,7 +129,7 @@ pub fn draw_minimap(world: &World, buf: &mut Buffer, area: Rect, view: &View) {
         width: MINIMAP_W as u16,
         height: rows as u16,
     };
-    let map = View { x: 0.0, y: 0.0, zoom, pixel: true };
+    let map = View { zoom, pixel: true, ..View::new() };
     draw_world(world, buf, r, &map, None);
 
     let (cols, vrows) = (area.width as i32 * view.zoom, area.height as i32 * view.zoom);
