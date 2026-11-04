@@ -10,6 +10,8 @@ Everything runs on its own. Sharks hunt, fish scatter and hide in the kelp, lion
 
 Want to see it big? Here is a 4000x1600 city after 9,000 ticks, at 12000x9600 pixels, [from above](docs/screenshots/city-huge.png) and [in 3D](docs/screenshots/city-huge-3d.png).
 
+The aquarium gets the same treatment: an 11520x7680 tank [from above](docs/screenshots/aquarium-huge.png) and [in 3D](docs/screenshots/aquarium-huge-3d.png), plus the camera swivel [at 1080p](docs/screenshots/aquarium-3d-huge.mp4).
+
 ## The worlds
 
 ### Aquarium
@@ -97,6 +99,7 @@ cargo run --release -- --dump zoo 30 120 40        # headless: print one frame a
 cargo run --release -- --bench city 60 600 200     # simulation and drawing speed
 python3 tools/screenshots.py                       # regenerate the images here (needs Pillow)
 python3 tools/record_gif.py                        # regenerate the 3D clip (also needs ffmpeg)
+python3 tools/record_gif.py huge                   # the same clip at 1080p, as GIF and MP4
 ```
 
 `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `CAM3D=yaw,pitch`, `RIDE=kind`, `SEED=n` and `OUT=cells.txt` tune `--dump`, and `tools/render.py cells.txt out.png` turns a cell dump into an image. The screenshots are real frames made this way, so they leave out the status bar and overlays.

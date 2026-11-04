@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Record the README's animated 3D clip from a release build. Run from the repository root.
+"""Record the animated 3D clips from a release build. Run from the repository root.
+
+usage: record_gif.py [huge]    `huge` makes a 1080p GIF and MP4 instead of the README clip.
 
 Each frame is a separate `--dump` run. A fixed seed makes every run replay the same
 world, so the frames join into one continuous clip. Needs Pillow and ffmpeg.
@@ -7,12 +9,14 @@ world, so the frames join into one continuous clip. Needs Pillow and ffmpeg.
 import math
 import os
 import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-OUT = "docs/screenshots/aquarium-3d.gif"
+OUT = "docs/screenshots/aquarium-3d"
 SEED = "7"
-WORLD, COLS, ROWS = "240x80", 240, 68
+HUGE = sys.argv[1:] == ["huge"]
+WORLD, COLS, ROWS = ("640x213", 640, 180) if HUGE else ("240x80", 240, 68)
 # Starts in daylight, like the aquarium stills.
 START = 260.0
 FPS = 15
@@ -42,13 +46,14 @@ def frame(tmp, i):
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
+        with ThreadPoolExecutor(max_workers=os.cpu_count() // 2) as pool:
             list(pool.map(lambda i: frame(tmp, i), range(FPS * SECONDS)))
+        frames = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", os.path.join(tmp, "%04d.png")]
         palette = "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4"
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", os.path.join(tmp, "%04d.png"), "-vf", palette, "-loop", "0", OUT],
-            check=True,
-        )
+        name = OUT + "-huge" if HUGE else OUT
+        subprocess.run(frames + ["-vf", palette, "-loop", "0", name + ".gif"], check=True)
+        if HUGE:
+            subprocess.run(frames + ["-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", name + ".mp4"], check=True)
 
 
 if __name__ == "__main__":
