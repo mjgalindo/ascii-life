@@ -19,7 +19,7 @@ target/release/ascii-zoo --dump <world> <seconds> <cols> <rows>
 python3 tools/screenshots.py
 ```
 
-`--dump` takes `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `CAM3D=yaw,pitch`, `SEED=n` and `OUT=file`. Worlds are aquarium, traffic, zoo, village, city and gallery.
+`--dump` takes `WORLD=WxH`, `VIEW=x,y,zoom`, `PIXEL=1`, `CAM3D=yaw,pitch`, `RIDE=kind`, `SEED=n` and `OUT=file`. Worlds are aquarium, traffic, zoo, village, city and gallery.
 
 ## Layout
 

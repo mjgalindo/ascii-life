@@ -23,6 +23,7 @@ const HELP: &[&str] = &[
     "v          3D view               , . ; '  orbit, tilt",
     "",
     "click      inspect a creature    f     follow it",
+    "b          ride a creature (the selected one, or any)",
     "c          director: camera chases the action",
     "j          jump to latest news   l     news log",
     "n          minimap               ?     this help",

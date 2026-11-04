@@ -4,7 +4,7 @@ mod scenarios;
 mod ui;
 
 use engine::render::{draw_world, hud_style, pick, View, MAX_ZOOM};
-use engine::render3d::{pick_3d, unproject, PITCH_RANGE};
+use engine::render3d::{pick_3d, ride_angles, unproject, PITCH_RANGE};
 use engine::world::Space;
 use engine::World;
 use ratatui::crossterm::event::{
@@ -32,6 +32,8 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(300);
 const DIRECTOR_SHOT: f32 = 14.0;
 /// Radians the 3D camera orbits per key press.
 const ORBIT_STEP: f32 = 0.12;
+/// Share of the remaining turn the chase camera makes each frame.
+const RIDE_EASE: f32 = 0.06;
 
 fn seed() -> u64 {
     if let Some(v) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
@@ -140,6 +142,14 @@ fn dump(args: &[String]) {
     }
     let mut view = view_from_env();
     view.clamp(&world, cols as i32, rows as i32);
+    if let Ok(kind) = std::env::var("RIDE") {
+        view.rider = world.ents.iter().find(|e| e.alive && e.kind == kind).map(|e| e.id);
+        view.three_d = true;
+        if let Some((yaw, pitch)) = view.rider.and_then(|id| ride_angles(&world, id)) {
+            view.yaw = yaw;
+            view.pitch = pitch;
+        }
+    }
     let area = Rect::new(0, 0, cols, rows);
     let mut buf = ratatui::buffer::Buffer::empty(area);
     draw_world(&world, &mut buf, area, &view, None);
@@ -293,6 +303,7 @@ fn main() -> std::io::Result<()> {
     let mut resized: Option<Instant> = None;
     let mut menu_open = false;
     let mut armed: Option<usize> = None;
+    let mut orbit = (view.yaw, view.pitch);
 
     let result = (|| -> std::io::Result<()> {
         loop {
@@ -343,6 +354,17 @@ fn main() -> std::io::Result<()> {
                 }
             }
             view.clamp(&world, cols, rows);
+            if let Some(id) = view.rider {
+                if !world.ents.iter().any(|e| e.id == id && e.alive) {
+                    view.rider = None;
+                    (view.yaw, view.pitch) = orbit;
+                } else if let Some((yaw, pitch)) = ride_angles(&world, id) {
+                    // Ease toward the heading along the short way round, so turns read as turns.
+                    let turn = (yaw - view.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    view.yaw += turn * RIDE_EASE;
+                    view.pitch += (pitch - view.pitch) * RIDE_EASE;
+                }
+            }
 
             terminal.draw(|f| {
                 let area = f.area();
@@ -451,6 +473,15 @@ fn main() -> std::io::Result<()> {
                             KeyCode::Char('t') => turbo = !turbo,
                             KeyCode::Char('m') => view.pixel = !view.pixel,
                             KeyCode::Char('v') => view.three_d = !view.three_d,
+                            KeyCode::Char('b') => {
+                                if view.rider.take().is_some() {
+                                    (view.yaw, view.pitch) = orbit;
+                                } else {
+                                    orbit = (view.yaw, view.pitch);
+                                    view.rider = selected.or_else(|| pick_subject(&mut world));
+                                    view.three_d = view.rider.is_some() || view.three_d;
+                                }
+                            }
                             KeyCode::Char(',') if view.three_d => view.yaw -= ORBIT_STEP,
                             KeyCode::Char('.') if view.three_d => view.yaw += ORBIT_STEP,
                             KeyCode::Char(';') if view.three_d => {

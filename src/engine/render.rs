@@ -22,13 +22,15 @@ pub struct View {
     pub three_d: bool,
     pub yaw: f32,
     pub pitch: f32,
+    /// Creature the 3D camera chases, overriding the orbit target.
+    pub rider: Option<Id>,
 }
 
 pub const MAX_ZOOM: i32 = 16;
 
 impl View {
     pub fn new() -> View {
-        View { x: 0.0, y: 0.0, zoom: 1, pixel: false, three_d: false, yaw: 0.35, pitch: 0.45 }
+        View { x: 0.0, y: 0.0, zoom: 1, pixel: false, three_d: false, yaw: 0.35, pitch: 0.45, rider: None }
     }
 
     /// Keeps the camera inside the world, centering when the world is smaller than the screen.

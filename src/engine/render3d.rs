@@ -12,6 +12,7 @@ use super::world::{FastHasher, Space, World};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::collections::HashMap;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 type Rgb = [u8; 3];
@@ -27,6 +28,16 @@ const BACKDROP_Z: i32 = 90;
 /// Lit fraction of the box faces that do not carry the sprite.
 const ROOF_LIGHT: f32 = 1.0;
 const SIDE_LIGHT: f32 = 0.65;
+
+/// Strongest darkening of the ground under a shadow, at full daylight.
+const SHADOW_DEPTH: f32 = 0.42;
+/// Things in the air or made of light cast no shadow.
+const SHADOWLESS_KINDS: &[&str] = &["rain", "snow", "spark", "emote", "smoke", "bubble", "flame", "fire"];
+const RAY_SAMPLES: usize = 6;
+/// Brightness levels of the light shafts. Few levels keep the number of changed terminal
+/// cells low, since terminals pay for every one.
+const RAY_LEVELS: f32 = 6.0;
+const RAY_COLOR: [f32; 3] = [50.0, 85.0, 105.0];
 
 const FLAT_KINDS: &[&str] = &["road", "ground", "terrain", "field", "pen", "trail"];
 const BOX_KINDS: &[&str] = &["building", "house", "tank", "kiosk", "site"];
@@ -62,6 +73,50 @@ fn hash01(id: Id) -> f32 {
     ((h >> 40) & 0xFFFF) as f32 / 65536.0
 }
 
+/// Shadow length per unit of height, signed by the side the sun is on. Follows the day cycle
+/// so that shadows sweep across the ground from morning to evening.
+fn sun_slope(world: &World) -> f32 {
+    let Some(len) = world.scenario.as_ref().and_then(|s| s.day_length()) else { return 0.6 };
+    let phase = (world.time / len as f64 + 0.15).fract() * std::f64::consts::TAU;
+    phase.cos() as f32 * 1.2
+}
+
+/// Where the chase camera aims and how far back it sits.
+fn chase_target(world: &World, e: &Entity) -> (V3, f32) {
+    let mut root = e;
+    for _ in 0..4 {
+        match root.follow.and_then(|f| world.ents.iter().find(|p| p.id == f.parent)) {
+            Some(p) => root = p,
+            None => break,
+        }
+    }
+    let (w, h) = (root.w(), root.h() * 2.0);
+    let target = match space(world) {
+        Space::Ground => [root.cx(), h / 2.0, -2.0 * (root.pos.1 + root.h())],
+        Space::Tank => {
+            let span = tank_depth(world);
+            [root.cx(), -2.0 * root.cy(), hash01(root.id) * span * 0.9 + span * 0.05]
+        }
+    };
+    (target, (w.max(h) * 3.5).max(14.0))
+}
+
+/// Camera yaw and pitch that look along a creature's motion, or `None` while it is still.
+pub fn ride_angles(world: &World, id: Id) -> Option<(f32, f32)> {
+    let e = world.ents.iter().find(|e| e.id == id && e.alive)?;
+    let (vx, vy) = e.vel;
+    if vx.abs() + vy.abs() < 0.05 {
+        return None;
+    }
+    Some(match space(world) {
+        Space::Ground => (vx.atan2(-2.0 * vy), 0.3),
+        Space::Tank => {
+            let climb = (2.0 * vy).atan2(vx.abs().max(0.01)) * 0.5;
+            (if vx >= 0.0 { 1.2 } else { -1.2 }, (0.18 + climb).clamp(PITCH_RANGE.0, PITCH_RANGE.1))
+        }
+    })
+}
+
 struct Camera {
     pos: V3,
     fwd: V3,
@@ -72,6 +127,7 @@ struct Camera {
     cols: f32,
     rows: f32,
     dist: f32,
+    chasing: bool,
 }
 
 impl Camera {
@@ -89,8 +145,14 @@ impl Camera {
         let up = cross(fwd, right);
         let step = 2.0 * TAN_HALF_FOV / cols.max(1) as f32;
         // At this distance one column spans `zoom` world cells, matching the flat view.
-        let dist = z / step;
-        Camera { pos: sub(target, mul(fwd, dist)), fwd, right, up, step, cols: cols as f32, rows: rows as f32, dist }
+        let mut dist = z / step;
+        let mut target = target;
+        let mut chasing = false;
+        if let Some(e) = view.rider.and_then(|id| world.ents.iter().find(|e| e.id == id && e.alive)) {
+            (target, dist) = chase_target(world, e);
+            chasing = true;
+        }
+        Camera { pos: sub(target, mul(fwd, dist)), fwd, right, up, step, cols: cols as f32, rows: rows as f32, dist, chasing }
     }
 
     /// Ray through a point given in fractional terminal cells.
@@ -117,6 +179,10 @@ enum Tex<'a> {
     Pix(Arc<PixFrame>),
     Cells(&'a Frame),
     Solid(Rgb),
+    /// Lit sand, whose position in space drives the moving caustic pattern.
+    Sand(Rgb, f32),
+    /// Darkens what lies beneath instead of painting; `true` gives a soft round blob.
+    Shadow(bool),
 }
 
 /// Rectangle in space. `u` runs along sprite columns and `v` down sprite rows; they must be
@@ -143,6 +209,18 @@ impl Quad<'_> {
     fn sample(&self, u: f32, v: f32) -> Option<(char, Rgb, Option<Rgb>)> {
         let found = match &self.tex {
             Tex::Solid(c) => Some((' ', *c, Some(*c))),
+            Tex::Shadow(_) => None,
+            Tex::Sand(c, time) => {
+                let (x, z) = (self.p[0] + u * self.u[0], self.p[2] + v * self.v[2]);
+                let wave = (x * 0.35 + time * 0.7).sin() + (z * 0.4 - time * 0.5).sin() + ((x + z) * 0.2 + time * 0.3).sin();
+                let glow = if wave > 1.5 { 1.4 } else if wave > 0.8 { 1.18 } else { 1.0 };
+                let lit = [
+                    (c[0] as f32 * glow).min(255.0) as u8,
+                    (c[1] as f32 * glow).min(255.0) as u8,
+                    (c[2] as f32 * glow).min(255.0) as u8,
+                ];
+                Some((' ', lit, Some(lit)))
+            }
             Tex::Pix(f) => {
                 let (x, y) = (((u * f.w as f32) as usize).min(f.w - 1), ((v * f.h as f32) as usize).min(f.h - 1));
                 f.px[y * f.w + x].map(|c| {
@@ -202,6 +280,8 @@ struct Scene<'a> {
     cam: &'a Camera,
     pixel: bool,
     selected: Option<Id>,
+    sun: f32,
+    time: f32,
     parents: HashMap<Id, &'a Entity, std::hash::BuildHasherDefault<FastHasher>>,
     quads: Vec<Quad<'a>>,
 }
@@ -248,6 +328,10 @@ impl<'a> Scene<'a> {
         let (w, h) = (e.w(), e.h() * 2.0);
         // Cheap rejection before touching the texture; most of a large world is off screen.
         let Some((col, row, t)) = self.cam.project(foot) else { return };
+        // Anything between a chase camera and its creature would block the shot.
+        if self.cam.chasing && t < self.cam.dist * 0.8 {
+            return;
+        }
         let span = w.max(h) / (t * self.cam.step);
         if col < -span || col > self.cam.cols + span || row < -span || row > self.cam.rows + span {
             return;
@@ -277,8 +361,33 @@ impl<'a> Scene<'a> {
             let root_foot = root.pos.1 + root.h();
             // Followers keep their offset as height, so a rider stays above its mount.
             let lift = ((root_foot - (y + h)) * 2.0).max(0.0);
+            if lift == 0.0 && !SHADOWLESS_KINDS.contains(&e.kind) {
+                self.creature_shadow(e, x + w / 2.0, -2.0 * root_foot);
+            }
             self.billboard(e, [x + w / 2.0, lift, -2.0 * root_foot]);
         }
+    }
+
+    /// Soft blob at a sprite's feet, stretched and shifted away from the sun.
+    fn creature_shadow(&mut self, e: &Entity, cx: f32, foot_z: f32) {
+        let (w, tall) = (e.w(), e.h() * 2.0);
+        let Some((col, row, _)) = self.cam.project([cx, 0.0, foot_z]) else { return };
+        if col < -40.0 || col > self.cam.cols + 40.0 || row < -40.0 || row > self.cam.rows + 40.0 {
+            return;
+        }
+        let reach = self.sun * tall * 0.5;
+        let width = w + reach.abs();
+        let left = cx - w / 2.0 + reach.min(0.0);
+        self.shadow_quad(e, [left, 0.0, foot_z + w * 0.3], width, w * 0.6, true);
+    }
+
+    fn shadow_quad(&mut self, e: &Entity, p: V3, width: f32, depth: f32, round: bool) {
+        let mut q = self.base(e, Tex::Shadow(round), p, [width, 0.0, 0.0], [0.0, 0.0, -depth]);
+        q.phase = 0;
+        q.depth_test = false;
+        q.pickable = false;
+        q.depth = 0.0;
+        self.quads.push(q);
     }
 
     /// Solid block on the sprite's footprint, with the sprite as its front wall.
@@ -294,6 +403,8 @@ impl<'a> Scene<'a> {
             ([x + w, height, z1], [0.0, 0.0, d], [0.0, -height, 0.0], SIDE_LIGHT),
             ([x + w, height, z0], [-w, 0.0, 0.0], [0.0, -height, 0.0], SIDE_LIGHT),
         ];
+        let reach = self.sun * height;
+        self.shadow_quad(e, [x + reach.min(0.0), 0.0, z0], w + reach.abs(), d, false);
         let centre = [x + w / 2.0, height / 2.0, z0 - d / 2.0];
         let Some((_, _, t)) = self.cam.project(centre) else { return };
         for (p, u, v, shade) in faces {
@@ -351,7 +462,7 @@ impl<'a> Scene<'a> {
             }
             let top = -(e.pos.1 * 2.0 + surface[start] as f32);
             let (xa, width) = (x0 + start as f32, (end - start) as f32);
-            let mut floor = self.base(e, Tex::Solid(sand), [xa, top, 0.0], [width, 0.0, 0.0], [0.0, 0.0, depth_span]);
+            let mut floor = self.base(e, Tex::Sand(sand, self.time), [xa, top, 0.0], [width, 0.0, 0.0], [0.0, 0.0, depth_span]);
             floor.phase = 0;
             self.quads.push(floor);
             let drop = bottom + top;
@@ -378,7 +489,7 @@ impl<'a> Scene<'a> {
 /// Every surface in the world, in paint order.
 fn build_scene<'a>(world: &'a World, cam: &'a Camera, pixel: bool, selected: Option<Id>) -> Vec<Quad<'a>> {
     let parents = world.ents.iter().filter(|e| e.alive).map(|e| (e.id, e)).collect();
-    let mut s = Scene { cam, pixel, selected, parents, quads: Vec::with_capacity(world.ents.len()) };
+    let mut s = Scene { cam, pixel, selected, sun: sun_slope(world), time: world.time as f32, parents, quads: Vec::with_capacity(world.ents.len()) };
     let kind = space(world);
     let depth_span = tank_depth(world);
     if matches!(kind, Space::Ground) {
@@ -440,7 +551,7 @@ fn mix(a: Rgb, b: Rgb, k: f32) -> Rgb {
 
 /// Fills the part of the target a quad covers. `rows_per_cell` is the target's vertical
 /// resolution: 2 for half-block pixels, 1 for text.
-fn raster(q: &Quad, cam: &Camera, t: &mut Target, rows_per_cell: f32, haze: Rgb, fog_span: f32) {
+fn raster(q: &Quad, cam: &Camera, t: &mut Target, rows_per_cell: f32, haze: Rgb, fog_span: f32, shadow: f32) {
     let corners = [q.p, add(q.p, q.u), add(q.p, q.v), add(add(q.p, q.u), q.v)];
     let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     let mut clipped = false;
@@ -467,6 +578,13 @@ fn raster(q: &Quad, cam: &Camera, t: &mut Target, rows_per_cell: f32, haze: Rgb,
             let ray = cam.ray(px as f32 + 0.5, row);
             let Some((d, u, v)) = q.hit(cam.pos, ray) else { continue };
             let i = (py * t.w + px) as usize;
+            if let Tex::Shadow(round) = q.tex {
+                let (a, b) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
+                if !round || a * a + b * b < 1.0 {
+                    t.bg[i] = scaled(t.bg[i], shadow);
+                }
+                continue;
+            }
             if q.depth_test && d > t.depth[i] {
                 continue;
             }
@@ -517,10 +635,14 @@ pub fn draw_world_3d(world: &World, buf: &mut Buffer, area: Rect, view: &View, s
     let haze = haze_of(world);
     let mut t = Target { w, h, ch: vec![' '; n], fg: vec![[255; 3]; n], bg: vec![haze; n], depth: vec![f32::MAX; n] };
     let fog_span = fog_span_of(world);
-    for q in &quads {
-        raster(q, &cam, &mut t, rows_per_cell as f32, haze, fog_span);
-    }
     let daylight = light(world);
+    let shadow = 1.0 - SHADOW_DEPTH * daylight;
+    for q in &quads {
+        raster(q, &cam, &mut t, rows_per_cell as f32, haze, fog_span, shadow);
+    }
+    if space(world) == Space::Tank {
+        light_shafts(world, &cam, &mut t, rows_per_cell as f32, daylight);
+    }
     for sy in 0..rows {
         for sx in 0..cols {
             let cell = &mut buf[(area.x + sx as u16, area.y + sy as u16)];
@@ -540,6 +662,39 @@ pub fn draw_world_3d(world: &World, buf: &mut Buffer, area: Rect, view: &View, s
     if view.pixel {
         draw_labels(world, buf, area, &cam, &t, daylight);
     }
+}
+
+/// Sunlight through the water: each ray marches through the tank adding up the light it
+/// crosses, so shafts stay put in space as the camera moves and pass behind creatures.
+fn light_shafts(world: &World, cam: &Camera, t: &mut Target, rows_per_cell: f32, daylight: f32) {
+    let (w, h, span) = (world.w as f32, world.h as f32 * 2.0, tank_depth(world));
+    let time = world.time as f32;
+    let cols = t.w as usize;
+    let depth = &t.depth;
+    t.bg.par_chunks_mut(cols).enumerate().for_each(|(py, line)| {
+        let row = (py as f32 + 0.5) / rows_per_cell;
+        for (px, bg) in line.iter_mut().enumerate() {
+            let ray = cam.ray(px as f32 + 0.5, row);
+            let reach = depth[py * cols + px].min(cam.pos[2].abs() + span + w);
+            let mut sum = 0.0;
+            for s in 0..RAY_SAMPLES {
+                let p = add(cam.pos, mul(ray, (s as f32 + 0.5) / RAY_SAMPLES as f32 * reach));
+                if p[0] < 0.0 || p[0] > w || p[1] > 0.0 || p[1] < -h || p[2] < 0.0 || p[2] > span {
+                    continue;
+                }
+                // Shafts lean with height, and two drifting waves make them open and close.
+                let lean = p[0] + p[1] * 0.35;
+                let wave = (lean * 0.11 + time * 0.13).sin() + (lean * 0.043 + p[2] * 0.05 - time * 0.09).sin();
+                sum += (wave - 0.9).max(0.0) * (1.0 + p[1] / h);
+            }
+            let level = (sum / RAY_SAMPLES as f32 * daylight * RAY_LEVELS).round() / RAY_LEVELS;
+            if level > 0.0 {
+                for k in 0..3 {
+                    bg[k] = (bg[k] as f32 + RAY_COLOR[k] * level).min(255.0) as u8;
+                }
+            }
+        }
+    });
 }
 
 /// Text sprites stay flat and readable, and only appear close up where they fit.
@@ -622,7 +777,7 @@ mod tests {
     use crate::scenarios;
 
     fn tilted() -> View {
-        View { x: 20.0, y: 10.0, zoom: 1, pixel: true, three_d: true, yaw: 0.4, pitch: 0.5 }
+        View { x: 20.0, y: 10.0, zoom: 1, pixel: true, three_d: true, yaw: 0.4, pitch: 0.5, rider: None }
     }
 
     #[test]
